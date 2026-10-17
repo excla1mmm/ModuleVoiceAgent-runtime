@@ -1,5 +1,7 @@
 # Voice Agent runtime
 
+[![CI/CD](https://github.com/excla1mmm/ModuleVoiceAgent-runtime/actions/workflows/ci-cd.yml/badge.svg)](https://github.com/excla1mmm/ModuleVoiceAgent-runtime/actions/workflows/ci-cd.yml)
+
 Cloud side of the MikoPBX **ModuleVoiceAgent**: an AI voice secretary that answers calls on many PBXs.
 Asterisk (chan_websocket, Asterisk 22) streams each call to this service over WSS; the service runs
 Silero VAD, GigaAM v3 speech recognition, an OpenAI-compatible LLM and Piper speech synthesis, and tells
