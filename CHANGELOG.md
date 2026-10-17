@@ -58,6 +58,9 @@
   made-up "сейчас") is not saved: the agent asks for it. "Обратный звонок" is not a topic. No second
   "Записал вашу заявку" when the model already confirmed. Special tokens and filler (`<|start|>assistant`,
   `(ожидаем)......`) are not said.
+- The prompt keeps the agent in its role: requests to forget or change the rules, switch roles, retell the
+  instructions or talk about unrelated things get one polite refusal and a question about the company's
+  business; the company's own extra rules still apply.
 - A clause that is an English reasoning note ("Proceed with request_callback using phone 333.") is not said.
 - `SpeechEngines.recognize(audio, terms=())` takes the agent's terms; `Turn` receives the futures of its
   recognized pieces instead of the audio.
