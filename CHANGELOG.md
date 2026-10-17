@@ -64,6 +64,12 @@
 - `scripts/deploy.sh --restart` waits for a moment without calls and without uncollected results; before, a
   result the PBX came for just after the call ended was lost (the draining instance was no longer ready for the
   proxy and there was no second instance).
+- Callback requests: nothing is saved while the agent's reply still asks something; the saved request is read
+  back ("Записываю заявку: Егор, перезвоним завтра в 14:00 на номер …. Если что-то не так, поправьте")
+  instead of a fixed phrase; name and time are asked in one question; a time counts only when the caller named
+  a time (phone digits no longer do); another number needs 10 digits or more ("продиктуйте полностью");
+  zero-width characters are not spoken. "Чем ещё могу помочь?" counts only as the reply's last question (a
+  "нет" to "Удобно сейчас?" ended a call).
 - A clause that is an English reasoning note ("Proceed with request_callback using phone 333.") is not said.
 - `SpeechEngines.recognize(audio, terms=())` takes the agent's terms; `Turn` receives the futures of its
   recognized pieces instead of the audio.

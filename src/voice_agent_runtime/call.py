@@ -37,7 +37,8 @@ import numpy as np
 
 from .bundle import AgentBundle
 from .echo import ECHO_REMOVED_DB, EchoGuard, level_db, new_canceller
-from .guards import ANYTHING_ELSE, PHRASES, TOOL_RESULTS, CallContext, ReplyFilter, ToolDecision, decide, options_phrase
+from .guards import (ANYTHING_ELSE, PHRASES, TOOL_RESULTS, CallContext, ReplyFilter, ToolDecision, decide,
+                     last_question, options_phrase)
 from .hotwords import abbreviation_fixes, correct
 from .incremental import Utterance, join_pieces
 from .llm import LlmError, LlmSession
@@ -448,7 +449,7 @@ class CallSession:
     def _commit(self, turn: Turn, sent_wall: float) -> None:
         decision = turn.decision
         self.context.callback_wanted = turn.context.callback_wanted
-        self.context.asked_anything_else = bool(ANYTHING_ELSE.search(turn.reply))
+        self.context.asked_anything_else = bool(ANYTHING_ELSE.search(last_question(turn.reply)))
         self.context.caller_said = (*self.context.caller_said, turn.stt_text)[-40:]
         if decision.tool and decision.tool != "fallback":
             call_id = f"call_{len(self.history)}"

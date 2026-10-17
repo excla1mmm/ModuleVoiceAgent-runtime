@@ -223,13 +223,13 @@ def test_a_made_up_name_or_time_is_asked_for():
     c.callback_wanted = True
     args = '{"name":"Клиент","phone":"333","preferred_time":"сейчас","topic":"подсистема телефонии"}'
     d = decide("request_callback", args, "Создай мне заявочку на обратный звонок.", "", c)
-    assert d.callback is None and d.phrase == PHRASES["ask_name"]
+    assert d.callback is None and d.phrase == PHRASES["ask_name_and_time"]  # both missing: one question
     c.caller_said = ("Создай мне заявочку на обратный звонок.", "Меня зовут Анатолий.")
     args = '{"name":"Анатолий","phone":"333","preferred_time":"сейчас","topic":"подсистема телефонии"}'
     d = decide("request_callback", args, "Подожди", "", c)
     assert d.callback is None and d.phrase == PHRASES["ask_preferred_time"]
     d = decide("request_callback", args, "Давай в 6 вечера", "", c)
-    assert d.callback["name"] == "Анатолий" and d.phrase == PHRASES["callback_saved"]
+    assert d.callback["name"] == "Анатолий" and d.phrase.startswith("Записываю заявку: Анатолий")
 
 
 def test_the_request_itself_is_not_a_topic():
@@ -251,3 +251,56 @@ def test_special_tokens_and_filler_are_not_said():
     assert said == ["Анатолий,", "в какое время вам удобно перезвонить?"]
     said, _ = stream(["Секунду", "................", "<|start|>assistant"])
     assert said == ["Секунду"]
+
+
+def callback_ctx(*said, caller="333"):
+    c = ctx(caller=caller)
+    c.callback_wanted = True
+    c.caller_said = said
+    return c
+
+
+def test_no_request_is_saved_while_the_agent_is_still_asking():
+    c = callback_ctx("Я Арбуз", "перезвоните завтра в 2 часа дня")
+    args = '{"name":"Арбуз","phone":"333","preferred_time":"завтра в 14:00","topic":"модуль телефонии"}'
+    d = decide("request_callback", args, "Да", "Удобно перезвонить завтра в 14:00?", c)
+    assert d.callback is None and d.phrase == "" and "дождись ответа" in d.tool_result
+
+
+def test_phone_digits_are_not_a_time():
+    c = callback_ctx("Меня зовут Арбуз", "Нет, перезвони на номер 9 775 392 14 05")
+    args = '{"name":"Арбуз","phone":"9775392 1405","preferred_time":"сейчас","topic":"модуль телефонии"}'
+    d = decide("request_callback", args, "Нет, перезвони на номер 9 775 392 14 05", "", c)
+    assert d.callback is None and d.phrase == PHRASES["ask_preferred_time"]
+
+
+def test_an_incomplete_number_is_asked_in_full():
+    c = callback_ctx("Я Егор", "перезвоните завтра в 14:00")
+    args = '{"name":"Егор","phone":"897742765","preferred_time":"завтра в 14:00","topic":"лицензия"}'
+    d = decide("request_callback", args, "Мой номер 897742765", "", c)
+    assert d.callback is None and d.phrase == PHRASES["ask_phone_full"]
+    args = '{"name":"Егор","phone":"89774276512","preferred_time":"завтра в 14:00","topic":"лицензия"}'
+    d = decide("request_callback", args, "8 977 427 65 12", "", c)
+    assert d.callback["phone"] == "89774276512"
+    assert d.phrase == ("Записываю заявку: Егор, перезвоним завтра в 14:00 на номер 89774276512. "
+                        "Если что-то не так, поправьте. Чем ещё могу помочь?")
+
+
+def test_the_callers_own_number_is_read_back_as_such():
+    c = callback_ctx("Я Егор", "перезвоните в 6 вечера")
+    args = '{"name":"Егор","phone":"","preferred_time":"18:00","topic":"лицензия"}'
+    d = decide("request_callback", args, "на этот номер", "", c)
+    assert "на номер, с которого вы звоните" in d.phrase and d.callback["phone"] == "333"
+
+
+def test_anything_else_counts_only_as_the_last_question():
+    from voice_agent_runtime.guards import ANYTHING_ELSE, last_question
+    reply = "Чем ещё могу помочь? Удобно ли вам, чтобы специалист позвонил сейчас?"
+    assert not ANYTHING_ELSE.search(last_question(reply))
+    assert ANYTHING_ELSE.search(last_question("Записываю заявку: Егор. Чем ещё могу помочь?"))
+    assert last_question("Хорошо.") == ""
+
+
+def test_invisible_characters_are_not_said():
+    _, reply = stream(["Номер, который вы указали ранее: 897\u200b\u200b\u200b-742-765."])
+    assert reply == "Номер, который вы указали ранее: 897-742-765."

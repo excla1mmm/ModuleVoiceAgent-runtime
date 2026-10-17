@@ -32,6 +32,7 @@ CLAUSE_END = re.compile(r"(?<=[.!?,:;—])\s+")
 # a note "(We ...", tool arguments as JSON, a special token "<|start|>" or a run of dots
 REASONING_LEAK = re.compile(r"\(\s*[A-Za-z]|\{\s*\"|<\||\.{4,}")
 GLUED = re.compile(r"[.!?](?=[А-ЯЁA-Z(<])")  # "...звонка?Какой" / "...перезвонить?(ожидаем)"
+INVISIBLE = re.compile(r"[\u200b-\u200f\u2060-\u2064\ufeff\u00ad]")  # zero-width and soft hyphens: noise for TTS
 GLUED_REMARK = re.compile(r"(?<=[.!?])\([^)\d]*\)?\s*$")  # "...перезвонить?(ожидаем)": a remark, not speech
 LATIN_WORD = re.compile(r"[A-Za-z_]{2,}")
 CYRILLIC_LETTER = re.compile(r"[А-Яа-яЁё]")
@@ -57,18 +58,22 @@ PHRASES = {
     "offer_transfer": "Соединить вас с менеджером, который подберёт решение под вас?",
     "anything_else": "Хорошо. Чем ещё могу помочь?",
     "offer_callback": "Могу оформить заявку: менеджер перезвонит и подберёт выгодный вариант. Оформить?",
-    "callback_saved": "Записал вашу заявку, специалист перезвонит в указанное время. Могу ещё чем-нибудь помочь?",
     "unavailable": "Извините, сервис временно недоступен. Соединяю вас с сотрудником.",
     "transfer_denied": "К сожалению, не могу соединить с этим номером. Чем ещё могу помочь?",
     "options": "Могу соединить с отделами: {names}. Куда вас соединить?",
     "ask_name": "Как к вам обращаться?",
     "ask_phone": "Перезвонить вам на номер, с которого вы звоните?",
     "ask_preferred_time": "Когда вам удобно, чтобы мы перезвонили?",
+    "ask_name_and_time": "Как к вам обращаться и когда вам удобно, чтобы мы перезвонили?",
+    "ask_phone_full": "Продиктуйте, пожалуйста, номер полностью, вместе с кодом.",
     "ask_topic": "По какому вопросу вам перезвонить?",
 }
 CALLBACK_FIELDS = ("name", "phone", "preferred_time", "topic")
 PLACEHOLDER_NAMES = {"клиент", "абонент", "звонящий", "гость", "пользователь", "неизвестно", "не указано", "аноним"}
-TIME_SAID = re.compile(r"\d|утр|вечер|д[её]н|ночь|сейчас|сегодня|завтра|послезавтра|понедельн|вторн|сред[уаы]|четверг"
+# a time the caller named: words, or numbers that look like a time or a date (not the digits of a phone)
+TIME_SAID = re.compile(r"\b\d{1,2}[:.]\d{2}\b|\bв\s+\d{1,2}\b|\b\d{1,2}\s*(?:час|ч\b)|\b\d{1,2}[./]\d{1,2}\b"
+                       r"|\b\d{1,2}\s+(?:январ|феврал|март|апрел|ма[йя]|июн|июл|август|сентябр|октябр|ноябр|декабр)"
+                       r"|утр|вечер|д[её]н|ночь|сейчас|сегодня|завтра|послезавтра|понедельн|вторн|сред[уаы]|четверг"
                        r"|пятниц|суббот|воскресен|час|минут|обед|любое|когда угодно|неделе|недел|январ|феврал|март"
                        r"|апрел|ма[йя]|июн|июл|август|сентябр|октябр|ноябр|декабр", re.I)
 TOOL_RESULTS = {"request_callback": "Заявка на обратный звонок сохранена.",
@@ -112,7 +117,8 @@ class ReplyFilter:
         return "".join(kept)
 
     def _emit(self, clauses: list[str]) -> list[str]:
-        out = [c for c in (GLUED_REMARK.sub("", re.sub(r"\s+", " ", self._unstaged(c))).strip() for c in clauses)
+        out = [c for c in (GLUED_REMARK.sub("", re.sub(r"\s+", " ", INVISIBLE.sub("", self._unstaged(c)))).strip()
+                           for c in clauses)
                if c and not english_note(c)]
         self.said += out
         return out
@@ -149,6 +155,12 @@ class ReplyFilter:
             return []
         rest, self.pending = self.pending, ""
         return self._emit([rest])
+
+
+def last_question(reply: str) -> str:
+    """The last question of a reply ("" when it asks nothing): what the caller's next words answer."""
+    questions = re.findall(r"[^.!?]*\?", reply)
+    return questions[-1].strip() if questions else ""
 
 
 def options_phrase(queue_names: list[str]) -> str:
@@ -196,11 +208,20 @@ def missing_callback_fields(data: dict, said: str | None = None) -> list[str]:
     return [k for k in CALLBACK_FIELDS if k in missing]
 
 
+def callback_readback(callback: dict, caller: str) -> str:
+    """The saved request read back, so a wrong name, time or number can be corrected at once."""
+    phone = callback["phone"]
+    to = ("на номер, с которого вы звоните" if caller and re.sub(r"\D", "", phone) == re.sub(r"\D", "", caller)
+          else f"на номер {phone}")
+    return (f"Записываю заявку: {callback['name']}, перезвоним {callback['preferred_time']} {to}. "
+            "Если что-то не так, поправьте. Чем ещё могу помочь?")
+
+
 def callback_phone(raw: str, caller: str) -> str:
     """Digits of the phone to call back; "на этот номер" (no digits) means the number the caller uses, which
-    may be a short internal number."""
+    may be a short internal number. Another number must be complete: 10 digits or more."""
     digits = re.sub(r"[^\d+]", "", raw or "")
-    if len(re.sub(r"\D", "", digits)) >= 5:
+    if len(re.sub(r"\D", "", digits)) >= 10:
         return digits
     if digits and caller and re.sub(r"\D", "", digits) == re.sub(r"\D", "", caller):
         return caller
@@ -258,12 +279,22 @@ def decide(tool: str | None, raw_args: str, caller_text: str, reply: str, ctx: C
     if tool == "request_callback":
         ctx.callback_wanted = True
         args = dict(args)
-        args["phone"] = callback_phone(str(args.get("phone", "")), ctx.caller)
+        raw_phone = str(args.get("phone", ""))
+        args["phone"] = callback_phone(raw_phone, ctx.caller)
+        if reply.rstrip().endswith("?"):  # it is still asking (time, number, "всё верно?"): the answer first
+            return ToolDecision(tool, args, tool_result="Заявка не сохранена: сначала дождись ответа на свой "
+                                "вопрос, потом вызови request_callback ещё раз.")
         missing = missing_callback_fields(args, " ".join((*ctx.caller_said, caller_text)))
-        if missing:  # the model called too early or made a field up: ask for the first missing one ourselves
-            return ToolDecision(tool, args, phrase=PHRASES["ask_" + missing[0]],
+        if missing:  # the model called too early or made a field up: ask for what is missing ourselves
+            partial = 0 < len(re.sub(r"\D", "", str(raw_phone))) and "phone" in missing
+            ask = ("ask_phone_full" if partial and missing[0] == "phone"
+                   else "ask_name_and_time" if missing[0] == "name" and "preferred_time" in missing
+                   else "ask_" + missing[0])
+            return ToolDecision(tool, args, phrase=PHRASES[ask],
                                 tool_result="Заявка не сохранена, не хватает: " + ", ".join(missing) + ".")
         callback = {k: str(args[k]).strip()[:500] for k in CALLBACK_FIELDS}
-        confirmed = "заявк" in reply.lower()  # the model said it itself: no second confirmation
-        return ToolDecision(tool, args, phrase="" if confirmed else PHRASES["callback_saved"], callback=callback)
+        if "заявк" in reply.lower():  # the model confirmed it itself: no second confirmation
+            return ToolDecision(tool, args, callback=callback)
+        return ToolDecision(tool, args, phrase=callback_readback(callback, ctx.caller), phrase_cached=False,
+                            callback=callback)
     return ToolDecision(tool, args)
