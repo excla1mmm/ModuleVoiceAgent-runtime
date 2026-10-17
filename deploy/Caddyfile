@@ -1,0 +1,28 @@
+# TLS termination and blue-green routing for compose.bluegreen.yaml.
+# New connections go to the first runtime whose /ready answers 200: while a deploy runs, the new instance
+# becomes ready and the old one drains (its /ready answers 503), so new calls move to the new one and active
+# WebSockets stay on the old one until they end. A reload (new certificate) keeps active calls for 35 minutes:
+#   docker compose -f compose.bluegreen.yaml exec proxy caddy reload --config /etc/caddy/Caddyfile
+{
+	auto_https off
+	admin localhost:2019
+	log default {
+		level WARN  # the stopped color fails its health check every second
+	}
+}
+
+:8443 {
+	tls /tls/fullchain.pem /tls/privkey.pem
+
+	reverse_proxy runtime-blue:8443 runtime-green:8443 {
+		lb_policy first
+		lb_try_duration 10s
+		lb_try_interval 250ms
+		health_uri /ready
+		health_interval 1s
+		health_timeout 2s
+		health_status 200
+		flush_interval -1
+		stream_close_delay 35m
+	}
+}

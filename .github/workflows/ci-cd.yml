@@ -1,0 +1,100 @@
+# Tests on every push and pull request; a push to main also updates the runtime on the server.
+#
+# Secrets (Settings -> Secrets and variables -> Actions):
+#   VA_DEPLOY_HOST         server address
+#   VA_DEPLOY_USER         SSH user that runs docker on the server
+#   VA_DEPLOY_SSH_KEY      private key of that user (a deploy-only key)
+#   VA_DEPLOY_KNOWN_HOSTS  output of `ssh-keyscan <host>`: the server's host keys
+# Variables (optional):
+#   VA_DEPLOY_PATH         runtime directory on the server (default ~/voice-agent/runtime)
+#   VA_DEPLOY_ARGS         scripts/deploy.sh arguments (default --build --restart: a ~35 s pause at a moment
+#                          without calls; --build alone switches blue-green without a pause, needs RAM for two)
+#
+# The server keeps its own .env, tls/, config/ and model volume: they are never copied or deleted from here.
+name: CI/CD
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - name: Install (without the speech models: their tests are skipped)
+        run: |
+          uv venv
+          uv pip install -e ".[dev]"
+      - name: Lint
+        run: uv run --no-sync ruff check src tests
+      - name: Tests
+        run: uv run --no-sync pytest -q
+
+  deploy:
+    needs: test
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45  # build (up to ~10 min with new dependencies) + waiting for a moment without calls
+    environment: production
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false  # never stop a deploy halfway; the next one waits
+    env:
+      DEPLOY_PATH: ${{ vars.VA_DEPLOY_PATH || '~/voice-agent/runtime' }}
+      DEPLOY_ARGS: ${{ vars.VA_DEPLOY_ARGS || '--build --restart' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: SSH access
+        env:
+          SSH_KEY: ${{ secrets.VA_DEPLOY_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.VA_DEPLOY_KNOWN_HOSTS }}
+          HOST: ${{ secrets.VA_DEPLOY_HOST }}
+          USER: ${{ secrets.VA_DEPLOY_USER }}
+        run: |
+          test -n "$SSH_KEY" && test -n "$KNOWN_HOSTS" && test -n "$HOST" && test -n "$USER" \
+            || { echo "::error::deploy secrets are not set (see the header of this workflow)"; exit 1; }
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy && chmod 600 ~/.ssh/deploy
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          cat > ~/.ssh/config <<EOF
+          Host runtime
+            HostName $HOST
+            User $USER
+            IdentityFile ~/.ssh/deploy
+            IdentitiesOnly yes
+            StrictHostKeyChecking yes
+            ServerAliveInterval 30
+          EOF
+
+      - name: Copy the source
+        run: |
+          # code directories are mirrored (a deleted file disappears on the server too); top-level files are
+          # copied; .env, tls/, config/ and the models stay as they are on the server
+          for dir in src tests scripts deploy; do
+            rsync -az --delete --exclude __pycache__ "$dir/" "runtime:$DEPLOY_PATH/$dir/"
+          done
+          rsync -az Dockerfile .dockerignore pyproject.toml uv.lock README.md CHANGELOG.md .env.example \
+            compose.yaml compose.bluegreen.yaml "runtime:$DEPLOY_PATH/"
+
+      - name: Build and switch
+        run: ssh runtime "cd $DEPLOY_PATH && scripts/deploy.sh $DEPLOY_ARGS"
+
+      - name: Free the disk
+        if: always()
+        run: ssh runtime "docker image prune -f >/dev/null; df -h / | tail -1"
+
+      - name: Status
+        run: |
+          ssh runtime "cd $DEPLOY_PATH && for c in \$(docker ps --filter name=voice-agent-runtime- --format '{{.Names}}'); do
+            echo \"\$c: \$(docker exec \$c voice-agent-runtime status)\"; done"

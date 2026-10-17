@@ -1,0 +1,90 @@
+# MikoPBX Voice Agent runtime, blue-green: updates without dropping calls (see "Updates without downtime" in README).
+#
+#   echo "VA_ADMIN_TOKEN=$(openssl rand -hex 32)" >> .env    # the instances authenticate each other with it
+#   scripts/deploy.sh --build                                # first start and every update
+#
+# Caddy terminates TLS on the public port and sends new connections to the runtime whose /ready answers 200.
+# A deploy starts the other color next to the running one; it takes the agent bundles over from its peer,
+# reports ready, then the old one stops taking calls, finishes the active ones and is stopped. Every call is
+# its own WebSocket, so active calls stay where they are. Both runtimes are alive only during a deploy: the
+# host needs RAM for two (scripts/deploy.sh checks it).
+
+name: voice-agent-runtime
+
+x-runtime: &runtime
+  image: ${VA_IMAGE:-voice-agent-runtime:latest}
+  build: .
+  restart: unless-stopped
+  env_file:
+    - path: .env
+      required: true
+  volumes:
+    - models:/models
+    - data:/data                   # usage counters (VA_USAGE_DB), shared: counters are added, never overwritten
+    - ./config:/config:ro          # tenants.json (token hashes only)
+  read_only: true
+  tmpfs:
+    - /tmp:size=256m
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  stop_grace_period: 45s           # VA_DRAIN_SECONDS (30) + aiohttp shutdown (5) + margin
+  logging:
+    driver: json-file
+    options:
+      max-size: 20m
+      max-file: "5"
+
+x-behind-proxy: &behind-proxy
+  VA_TLS_CERT: ""                  # TLS is the proxy's
+  VA_TLS_KEY: ""
+  VA_TRUSTED_PROXY: "true"
+  VA_LISTEN_PORT: "8443"
+
+services:
+  proxy:
+    image: caddy:2.8.4-alpine
+    container_name: voice-agent-proxy
+    restart: unless-stopped
+    user: "10002:10002"            # the owner of the TLS key, like the runtime
+    ports:
+      - "${VA_PUBLIC_BIND:-127.0.0.1}:${VA_PUBLIC_PORT:-443}:8443"
+    environment:
+      XDG_CONFIG_HOME: /tmp/caddy-config
+      XDG_DATA_HOME: /tmp/caddy-data
+    volumes:
+      - ./deploy:/etc/caddy:ro       # the directory, not the file: an edited Caddyfile is seen by caddy reload
+      - ${VA_TLS_DIR:-./tls}:/tls:ro  # fullchain.pem / privkey.pem
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE           # /usr/bin/caddy carries this file capability: without it exec is refused
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: 20m
+        max-file: "5"
+
+  runtime-blue:
+    <<: *runtime
+    container_name: voice-agent-runtime-blue
+    environment:
+      <<: *behind-proxy
+      VA_PEER_URL: http://runtime-green:8443
+
+  runtime-green:
+    <<: *runtime
+    container_name: voice-agent-runtime-green
+    environment:
+      <<: *behind-proxy
+      VA_PEER_URL: http://runtime-blue:8443
+
+volumes:
+  models:
+  data:

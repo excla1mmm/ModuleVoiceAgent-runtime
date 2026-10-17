@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "voice-agent-runtime"
+version = "0.2.0"
+description = "Cloud runtime of the MikoPBX ModuleVoiceAgent: Asterisk chan_websocket media, GigaAM STT, LLM, Piper and Silero TTS"
+requires-python = ">=3.12"
+dependencies = [
+    "aiohttp>=3.10,<4",
+    "numpy>=1.26",
+    "scipy>=1.11",
+    # 0.5.14 declines Russian numerals itself (case=, gender=)
+    "num2words>=0.5.14",
+]
+
+[project.optional-dependencies]
+# Speech models; the unit tests do not need them.
+speech = [
+    "onnxruntime>=1.20,<2",
+    "onnx-asr==0.12.0",
+    "piper-tts==1.3.0",
+    "huggingface-hub>=0.23",
+    # Silero TTS voices (VA_VOICES); the image installs the CPU-only torch build
+    "torch>=2.5,<3",
+    "silero-stress==1.5",
+    # WebRTC echo cancellation (AudioProcessingModule), Apache-2.0
+    "livekit==1.0.12",
+]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[project.scripts]
+voice-agent-runtime = "voice_agent_runtime.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "UP"]
+ignore = ["E501"]

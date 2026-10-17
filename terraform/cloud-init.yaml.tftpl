@@ -1,0 +1,143 @@
+#cloud-config
+# Voice Agent runtime shard ${hostname}: Docker, Caddy (TLS) and the runtime, managed by voice-agent.service.
+
+users:
+  - name: ${ssh_user}
+    shell: /bin/bash
+    sudo: "ALL=(ALL) NOPASSWD:ALL"
+    ssh_authorized_keys:
+      - ${jsonencode(trimspace(ssh_public_key))}
+
+package_update: true
+packages:
+  - docker.io
+  - docker-compose-v2
+  - jq
+  - curl
+
+write_files:
+  - path: /etc/docker/daemon.json
+    permissions: "0644"
+    content: |
+      ${daemon_json}
+
+  - path: /etc/voice-agent/.env
+    permissions: "0600"
+    content: |
+      ${indent(6, env_file)}
+
+  - path: /etc/voice-agent/config/tenants.json
+    permissions: "0644"
+    content: |
+      ${indent(6, tenants_json)}
+
+  - path: /etc/voice-agent/Caddyfile
+    permissions: "0644"
+    content: |
+%{ if acme_email != "" ~}
+      {
+        email ${acme_email}
+      }
+%{ endif ~}
+      ${hostname} {
+        # WebSocket upgrades (/media) pass through; the runtime trusts this proxy (VA_TRUSTED_PROXY).
+        reverse_proxy runtime:8443
+      }
+
+  - path: /etc/voice-agent/compose.yaml
+    permissions: "0644"
+    content: |
+      name: voice-agent
+      services:
+        runtime:
+          image: $${VA_IMAGE}
+          restart: unless-stopped
+          env_file: [.env]
+          ports:
+            - "127.0.0.1:8443:8443"   # local checks only; the PBXs come through Caddy
+          volumes:
+            - models:/models
+            - data:/data
+            - ./config:/config:ro
+            - ./secrets:/run/secrets:ro
+          read_only: true
+          tmpfs:
+            - /tmp:size=256m
+          cap_drop: [ALL]
+          security_opt: ["no-new-privileges:true"]
+          stop_grace_period: 45s      # VA_DRAIN_SECONDS (30) + aiohttp shutdown + margin
+          depends_on: [caddy]         # stopped before Caddy, so draining calls and result reads still pass
+          logging:
+            driver: json-file
+            options: {max-size: 20m, max-file: "5"}
+        caddy:
+          image: ${caddy_image}
+          restart: unless-stopped
+          ports:
+            - "80:80"
+            - "443:443"
+          volumes:
+            - ./Caddyfile:/etc/caddy/Caddyfile:ro
+            - caddy_data:/data
+            - caddy_config:/config
+          logging:
+            driver: json-file
+            options: {max-size: 20m, max-file: "5"}
+      volumes:
+        models: {}
+        data: {}
+        caddy_data: {}
+        caddy_config: {}
+
+  - path: /usr/local/bin/voice-agent-refresh
+    permissions: "0755"
+    content: |
+      #!/bin/bash
+      # Fetches the secrets from Lockbox, logs in to Container Registry, pulls and (re)starts the stack.
+      # Run after changing VA_IMAGE in /etc/voice-agent/.env; runs on every boot (voice-agent.service).
+      set -euo pipefail
+      umask 077
+      cd /etc/voice-agent
+      token=$(curl -sf --retry 20 --retry-delay 3 --retry-connrefused -H Metadata-Flavor:Google \
+        http://169.254.169.254/computeMetadata/v1/instance/service-accounts/default/token | jq -r .access_token)
+      payload=$(curl -sf --retry 10 --retry-delay 3 -H "Authorization: Bearer $token" \
+        https://payload.lockbox.api.cloud.yandex.net/lockbox/v1/secrets/${lockbox_secret_id}/payload)
+      mkdir -p secrets
+      for key in $(echo "$payload" | jq -r '.entries[].key'); do
+        echo "$payload" | jq -r --arg k "$key" '.entries[] | select(.key == $k) | .textValue' > "secrets/.$key"
+        mv -f "secrets/.$key" "secrets/$key"
+      done
+      chown -R 10002:10002 secrets   # the runtime's uid
+      chmod 0500 secrets && chmod 0400 secrets/*
+      image=$(sed -n 's/^VA_IMAGE=//p' .env)
+      case "$image" in
+        cr.yandex/*) echo "$token" | docker login --username iam --password-stdin cr.yandex >/dev/null ;;
+      esac
+      docker compose pull --quiet
+      docker compose up -d --remove-orphans
+
+  - path: /etc/systemd/system/voice-agent.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Voice Agent runtime (docker compose)
+      Requires=docker.service
+      After=docker.service network-online.target
+      Wants=network-online.target
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      ExecStart=/usr/local/bin/voice-agent-refresh
+      # Graceful stop: the runtime drains calls first, Caddy stops after it.
+      ExecStop=/usr/bin/docker compose --project-directory /etc/voice-agent stop
+      TimeoutStartSec=30min
+      TimeoutStopSec=120
+
+      [Install]
+      WantedBy=multi-user.target
+
+runcmd:
+  - systemctl restart docker
+  - systemctl daemon-reload
+  - systemctl enable --now voice-agent.service

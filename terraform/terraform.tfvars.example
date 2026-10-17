@@ -1,0 +1,40 @@
+# cp terraform.tfvars.example terraform.tfvars && chmod 600 terraform.tfvars
+
+cloud_id  = "b1g..."
+folder_id = "b1g..."
+zone      = "ru-central1-a"
+# service_account_key_file = "~/.config/yandex/terraform-sa.json"   # or export YC_TOKEN=$(yc iam create-token)
+
+shard_count     = 2
+domain          = "example.com"   # shards: voice-1.example.com, voice-2.example.com
+hostname_format = "voice-%d"
+dns_zone_id     = ""              # Cloud DNS zone of example.com; empty = create the A records yourself
+
+cores  = 4 # 8 concurrent calls per shard
+memory = 4
+
+ssh_public_key = "ssh-ed25519 AAAA... ops@example.com"
+admin_cidrs    = ["203.0.113.0/24"]
+allowed_cidrs  = ["0.0.0.0/0"] # or the PBXs' addresses only
+
+acme_email = "ops@example.com"
+
+# Image: the created registry + scripts/build-push.sh, or any reachable image.
+create_registry = true
+image_tag       = "latest"
+# runtime_image = "cr.yandex/crp.../voice-agent-runtime:1.4.0"
+
+# Docker Hub / Hugging Face mirrors, when the originals are unreachable.
+# caddy_image             = "mirror.gcr.io/library/caddy:2.8"
+# docker_registry_mirrors = ["https://mirror.gcr.io"]
+# hf_endpoint             = "https://hf-mirror.com"
+
+llm_api_key = "..." # or TF_VAR_llm_api_key
+# llm2_url     = "https://..."
+# llm2_model   = "..."
+# llm2_api_key = "..."
+
+extra_env = {
+  VA_MAX_CALLS_PER_TENANT = "4"
+  VA_LOG_LEVEL            = "INFO"
+}

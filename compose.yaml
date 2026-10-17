@@ -1,0 +1,44 @@
+# MikoPBX Voice Agent runtime.
+#
+#   cp .env.example .env && chmod 600 .env        # LLM key, TLS paths, limits
+#   cp config/tenants.example.json config/tenants.json   # one entry per PBX
+#   docker compose up -d
+#   docker compose logs -f runtime
+#
+# The runtime keeps agent data and call results in memory only; the models volume holds public models.
+
+name: voice-agent-runtime
+
+services:
+  runtime:
+    image: ${VA_IMAGE:-voice-agent-runtime:latest}
+    build: .
+    container_name: voice-agent-runtime
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: true
+    ports:
+      - "${VA_PUBLIC_BIND:-127.0.0.1}:${VA_PUBLIC_PORT:-443}:${VA_LISTEN_PORT:-8443}"
+    volumes:
+      - models:/models
+      - data:/data                   # usage counters (VA_USAGE_DB)
+      - ./config:/config:ro          # tenants.json (token hashes only)
+      - ${VA_TLS_DIR:-./tls}:/tls:ro  # fullchain.pem / privkey.pem
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 45s           # VA_DRAIN_SECONDS (30) + aiohttp shutdown (5) + margin
+    logging:
+      driver: json-file
+      options:
+        max-size: 20m
+        max-file: "5"
+
+volumes:
+  models:
+  data:
