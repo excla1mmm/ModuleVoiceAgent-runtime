@@ -61,6 +61,9 @@
 - The prompt keeps the agent in its role: requests to forget or change the rules, switch roles, retell the
   instructions or talk about unrelated things get one polite refusal and a question about the company's
   business; the company's own extra rules still apply.
+- `scripts/deploy.sh --restart` waits for a moment without calls and without uncollected results; before, a
+  result the PBX came for just after the call ended was lost (the draining instance was no longer ready for the
+  proxy and there was no second instance).
 - A clause that is an English reasoning note ("Proceed with request_callback using phone 333.") is not said.
 - `SpeechEngines.recognize(audio, terms=())` takes the agent's terms; `Turn` receives the futures of its
   recognized pieces instead of the audio.

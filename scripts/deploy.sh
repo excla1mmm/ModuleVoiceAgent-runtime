@@ -11,8 +11,11 @@
 # If the new instance does not become ready, it is stopped and the old one keeps serving.
 #
 # Two runtimes need RAM for two: the script refuses below VA_DEPLOY_MIN_FREE_MB of MemAvailable. --restart is
-# the fallback for a small host: it waits for a moment without calls (up to VA_DEPLOY_IDLE_WAIT seconds), stops
-# the old instance and starts the new one; calls during the start (about a minute) go to the PBX fallback numbers.
+# the fallback for a small host: it waits for a moment without calls and without results the PBXs have not
+# collected yet (up to VA_DEPLOY_IDLE_WAIT seconds), stops the old instance and starts the new one; calls during
+# the start (about a minute) go to the PBX fallback numbers. Waiting for the results matters: a draining
+# instance is no longer "ready", the proxy stops sending it requests, and with no second instance a PBX that
+# collects the result of a call that has just ended gets an error and the result is lost.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -74,9 +77,10 @@ wait_ready() {
 
 if [[ "$RESTART" == 1 || -z "$old" ]]; then
   if [[ -n "$old" ]]; then
-    log "waiting up to ${IDLE_WAIT}s for a moment without calls on $old"
+    log "waiting up to ${IDLE_WAIT}s for a moment without calls and uncollected results on $old"
     deadline=$((SECONDS + IDLE_WAIT))
-    until [[ "$(in_runtime "$old" status | field active_calls)" == 0 ]]; do
+    idle() { local s; s="$(in_runtime "$old" status)"; [[ "$(field active_calls <<<"$s")" == 0 && "$(field pending_results <<<"$s")" == 0 ]]; }
+    until idle; do
       if (( SECONDS >= deadline )); then
         [[ "$FORCE" == 1 ]] || { echo "calls never stopped; --force stops them (they go to the fallback numbers)" >&2; exit 1; }
         break
