@@ -21,6 +21,7 @@ from aiohttp import web
 
 from . import logs
 from .config import ConfigError, Settings
+from .llm import ProviderRouter
 from .metrics import Metrics
 from .server import Runtime, build_app, drain, ssl_context
 from .stores import BundleStore, ResultStore
@@ -47,6 +48,10 @@ def serve() -> int:
     runtime = Runtime(settings, tenants, SpeechEngines(settings), BundleStore(),
                       ResultStore(settings.result_ttl_s, settings.max_results_per_tenant), Metrics(),
                       usage=UsageMeter(settings.usage_db))
+    if settings.secondary is not None and settings.failover_after:
+        runtime.router = ProviderRouter(settings.primary, settings.secondary, settings.hedge_ms / 1000,
+                                        settings.failover_after, settings.failover_window_s,
+                                        settings.recovery_probe_s, settings.recovery_probes)
     asyncio.run(run_server(runtime))
     return 0
 
@@ -69,6 +74,8 @@ async def run_server(runtime: Runtime) -> None:
         log.info("stop requested, draining for up to %ds", settings.drain_s)
         await drain(runtime, settings.drain_s)
     finally:
+        if runtime.router is not None:
+            runtime.router.close()
         await runner.cleanup()
 
 

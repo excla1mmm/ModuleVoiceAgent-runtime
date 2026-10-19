@@ -9,7 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 
 from voice_agent_runtime.config import LlmProvider
-from voice_agent_runtime.llm import LlmError, LlmSession, parse_sse
+from voice_agent_runtime.llm import LlmError, LlmSession, ProviderRouter, parse_sse
 
 
 def sse(*chunks):
@@ -246,5 +246,120 @@ def test_stream_usage_can_be_turned_off():
         prov = LlmProvider("primary", f"http://127.0.0.1:{srv.server_port}/v1/off", "m", "k", stream_usage=False)
         collect(LlmSession(prov, None, 600, 0.2, 400))
         assert "stream_options" not in handler.requests[0][1]
+    finally:
+        srv.shutdown()
+
+
+def router_pair(primary_attrs=None, secondary_attrs=None, **router_kw):
+    """A primary and a secondary scripted server, a router over them and a session that uses it."""
+    p_srv, p_handler = server(**{"body": sse(text_chunk("основной")), **(primary_attrs or {})})
+    s_srv, s_handler = server(**{"body": sse(text_chunk("резерв")), **(secondary_attrs or {})})
+    kw = {"failures": 3, "window_s": 60.0, "probe_s": 3600.0, "probes": 3, "probe_gap_s": 0.0, **router_kw}
+    router = ProviderRouter(provider(p_srv, "primary"), provider(s_srv, "secondary"), 0.3, **kw)
+    session = LlmSession(provider(p_srv, "primary"), provider(s_srv, "secondary"), 300, 0.2, 400, router=router)
+    return session, router, (p_srv, p_handler), (s_srv, s_handler)
+
+
+def shutdown(router, *servers):
+    router.close()
+    for srv, _ in servers:
+        srv.shutdown()
+
+
+def test_router_fails_over_after_slow_turns_and_comes_back_after_probes():
+    session, router, primary, secondary = router_pair({"delay": 1.0})
+    try:
+        for _ in range(2):
+            assert collect(session) == [("text", "резерв")]  # each slow turn is answered by the hedge
+        assert router.active == 0
+        assert collect(session) == [("text", "резерв")]
+        assert router.active == 1 and router.status()["active"] == "secondary" and router.status()["next_probe"]
+        asked = len(primary[1].requests)
+        assert collect(session) == [("text", "резерв")]
+        assert len(primary[1].requests) == asked  # the secondary answered in time: the primary is not asked
+        primary[1].delay = 0.0  # the primary recovers
+        assert router.probe_now() is True
+        assert len(primary[1].requests) == asked + 3 and router.active == 0 and router.switches == 2
+        assert collect(session) == [("text", "основной")]
+    finally:
+        shutdown(router, primary, secondary)
+
+
+def test_router_counts_errors_and_a_good_turn_resets_the_count():
+    session, router, primary, secondary = router_pair({"status": 500, "body": b"boom"})
+    try:
+        collect(session), collect(session)
+        primary[1].status, primary[1].body = 200, sse(text_chunk("основной"))
+        assert collect(session) == [("text", "основной")]  # a good turn: the failures before do not add up
+        primary[1].status, primary[1].body = 500, b"boom"
+        collect(session), collect(session)
+        assert router.active == 0
+        assert collect(session) == [("text", "резерв")]
+        assert router.active == 1
+    finally:
+        shutdown(router, primary, secondary)
+
+
+def test_router_failures_outside_the_window_do_not_count():
+    session, router, primary, secondary = router_pair({"status": 500, "body": b"boom"}, window_s=0.3)
+    try:
+        collect(session), collect(session)
+        time.sleep(0.4)
+        collect(session)
+        assert router.active == 0
+    finally:
+        shutdown(router, primary, secondary)
+
+
+def test_router_failed_probe_keeps_the_secondary():
+    session, router, primary, secondary = router_pair({"status": 503, "body": b"down"})
+    try:
+        for _ in range(3):
+            collect(session)
+        assert router.active == 1
+        assert router.probe_now() is False and router.active == 1
+        assert len(primary[1].requests) == 4  # 3 turns and the first probe; a failed probe ends the series
+    finally:
+        shutdown(router, primary, secondary)
+
+
+def test_router_hands_back_to_the_primary_when_the_secondary_fails_too():
+    session, router, primary, secondary = router_pair({"delay": 1.0})
+    try:
+        for _ in range(3):
+            collect(session)
+        assert router.active == 1
+        primary[1].delay, secondary[1].delay = 0.0, 1.0
+        for _ in range(3):
+            assert collect(session) == [("text", "основной")]
+        assert router.active == 0 and router.status()["next_probe"] is None
+    finally:
+        shutdown(router, primary, secondary)
+
+
+def test_router_probes_by_itself_and_side_checks_follow_the_active_provider():
+    session, router, primary, secondary = router_pair({"status": 500, "body": b"boom"}, probe_s=0.3)
+    try:
+        for _ in range(3):
+            collect(session)
+        assert router.active == 1
+        check = session.check("Ты фильтр.", "x y z", 50)
+        check.poll(5.0)
+        assert check.text == "резерв"  # the topic filter asks the provider turns ask first
+        primary[1].status, primary[1].body = 200, sse(text_chunk("да"))
+        deadline = time.monotonic() + 5
+        while router.active != 0 and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert router.active == 0
+    finally:
+        shutdown(router, primary, secondary)
+
+
+def test_no_router_without_a_secondary():
+    srv, _ = server()
+    try:
+        p = provider(srv, "primary")
+        session = LlmSession(p, None, 600, 0.2, 400, router=ProviderRouter(p, p, 0.3))
+        assert session.router is None and collect(session) == [("text", "Ответ.")]
     finally:
         srv.shutdown()

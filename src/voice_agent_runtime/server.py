@@ -48,6 +48,7 @@ from . import __version__
 from .bundle import BundleError, parse_bundle
 from .call import CallSession
 from .config import VOICES, Settings
+from .llm import ProviderRouter
 from .metrics import Metrics
 from .normalize import normalize
 from .peer import Peer
@@ -89,6 +90,7 @@ class Runtime:
     boot_id: str = field(default_factory=lambda: uuid.uuid4().hex)  # a new instance: the PBX pushes its bundles at once
     ready: bool = True  # False while a new instance takes bundles over from its peer (GET /ready)
     peer: Peer | None = None
+    router: ProviderRouter | None = None  # which LLM provider calls ask first (failover), None: always the primary
 
     def tenant_call_limit(self, tenant: str) -> int:
         entry = self.tenants.get(tenant)
@@ -142,6 +144,13 @@ def _is_admin(request: web.Request) -> bool:
     return hmac.compare_digest(header[7:].strip().encode("utf-8", "replace"), token.encode("utf-8"))
 
 
+def _llm_status(rt: Runtime) -> dict:
+    if rt.router is not None:
+        return rt.router.status()
+    p = rt.settings.primary
+    return {"active": p.name, "model": p.model} if p is not None else {}
+
+
 async def health(request: web.Request) -> web.Response:
     rt = request.app[RUNTIME]
     status = "draining" if rt.draining else "ok"
@@ -151,13 +160,14 @@ async def health(request: web.Request) -> web.Response:
         return web.json_response({"status": status, "version": __version__, "boot_id": rt.boot_id, "ready": rt.ready,
                                   "bundles": len(rt.bundles),
                                   "max_calls": rt.settings.max_calls, "pending_results": rt.results.pending_count(),
+                                  "llm": _llm_status(rt),
                                   "tenants": {t: rt.tenant_usage(t) for t in rt.known_tenants()}, **snapshot})
     tenant = authenticate(request.headers.get("Authorization", ""), rt.tenants, "bearer")
     if tenant is None:
         return web.json_response({"status": status})
     return web.json_response({"status": status, "version": __version__, "boot_id": rt.boot_id,
                               "capabilities": list(CAPABILITIES), "tenant": rt.tenant_usage(tenant),
-                              "stages": rt.metrics.snapshot()["stages"]})
+                              "stages": rt.metrics.snapshot()["stages"], "llm": _llm_status(rt)})
 
 
 async def ready(request: web.Request) -> web.Response:

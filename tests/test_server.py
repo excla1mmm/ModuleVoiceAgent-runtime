@@ -89,8 +89,10 @@ def test_auth_is_required_and_per_tenant():
         assert health == {"status": "ok"}
         health = await (await client.get("/health", headers=bearer())).json()
         assert health["tenant"]["bundles"] == 1 and health["tenant"]["id"] == "pbx-acme"
+        assert health["llm"]["active"] == "primary"
         health = await (await client.get("/health", headers=admin())).json()
         assert health["bundles"] == 1 and health["tenants"]["pbx-acme"]["bundles"] == 1
+        assert health["llm"]["active"] == "primary"
     run(check)
 
 

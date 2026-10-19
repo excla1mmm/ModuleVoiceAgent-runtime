@@ -259,7 +259,8 @@ class CallSession:
         self.vad = self.engines.new_vad()
         self.worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"call-{self.id}")
         self.llm = LlmSession(self.settings.primary, self.settings.secondary, self.settings.hedge_ms,
-                              self.settings.temperature, self.settings.max_tokens)
+                              self.settings.temperature, self.settings.max_tokens,
+                              router=getattr(runtime, "router", None))
         self.pcm = bytearray()  # caller audio, last KEEP_AUDIO_S..2*KEEP_AUDIO_S seconds
         self.pcm_base = 0.0  # seconds of caller audio dropped from the front of self.pcm
         self.inbuf = b""

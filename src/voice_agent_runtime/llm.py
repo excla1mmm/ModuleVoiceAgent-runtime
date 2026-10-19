@@ -5,13 +5,16 @@
   otherwise the next request on it fails (``ResponseNotReady``). http.client reconnects on the next request.
 * Hedging: when a secondary provider is configured, it is asked as well if the primary gives no first
   token within ``hedge_ms`` or fails; the first provider to answer wins and the other request is dropped.
+* Failover (``ProviderRouter``, one per process): after a few such slow or failed turns in a row the other
+  provider is asked first by every call; the primary is probed now and then and gets the turns back once
+  it answers in time again.
 * Retry: a turn whose request failed before anything was yielded (e.g. a provider 500 on a malformed model
   message) is asked once more of the first provider instead of handing the caller to a person at once.
 * Usage: requests ask for token usage in the stream (``stream_options.include_usage``). A provider that
   rejects the option (HTTP 400/422 naming it) is asked again without it and remembered for the process.
   Every request the provider accepted is counted, including dropped speculative and hedged ones; without
   reported usage the tokens are estimated (characters / 3.2) and the request is counted as estimated.
-* Checks: a short side request (the topic filter, ``check``) goes to the primary provider over a connection
+* Checks: a short side request (the topic filter, ``check``) goes to the provider asked first over a connection
   of its own, in parallel with the turn's main stream; its tokens count in the call's usage.
 """
 
@@ -269,24 +272,140 @@ class Check:
         self.session._account(self.attempt)
 
 
+class ProviderRouter:
+    """Which provider a turn asks first, shared by all calls of the process.
+
+    The provider asked first fails a turn when it gives no first token within the hedge time or returns an
+    error before answering. ``failures`` such turns within ``window_s`` (with no good turn in between) make
+    the other provider the one asked first, for every call. While the secondary is asked first, the primary
+    is probed every ``probe_s``: ``probes`` short requests in a row, each answered within the hedge time,
+    bring it back. A secondary that fails the same way hands the turns back to the primary at once.
+    """
+
+    PROBE_TEXT = "Ответь одним словом: да."
+    PROBE_MAX_TOKENS = 32
+
+    def __init__(self, primary: LlmProvider, secondary: LlmProvider, limit_s: float, failures: int = 3,
+                 window_s: float = 300.0, probe_s: float = 28800.0, probes: int = 3, probe_gap_s: float = 5.0):
+        self.providers = (primary, secondary)
+        self.limit_s = limit_s if limit_s > 0 else primary.timeout
+        self.failures, self.window_s = failures, window_s
+        self.probe_s, self.probes, self.probe_gap_s = probe_s, probes, probe_gap_s
+        self.active = 0
+        self.since = time.time()
+        self.switches = 0
+        self.next_probe: float | None = None  # wall time of the next probe of the primary
+        self._failed: list[float] = []  # monotonic times of the active provider's failures in a row
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._prober: threading.Thread | None = None
+
+    def order(self) -> tuple[int, int]:
+        active = self.active
+        return active, 1 - active
+
+    def report(self, index: int, ok: bool) -> None:
+        """The outcome of a turn for the provider it asked first."""
+        with self._lock:
+            if index != self.active:
+                return  # asked first under the previous order: says nothing about the current one
+            if ok:
+                self._failed.clear()
+                return
+            now = time.monotonic()
+            self._failed = [t for t in self._failed if now - t <= self.window_s] + [now]
+            if len(self._failed) >= self.failures:
+                self._switch(1 - self.active, f"{len(self._failed)} slow or failed turns in a row")
+
+    def _switch(self, index: int, reason: str) -> None:
+        old = self.providers[self.active]
+        self.active, self._failed, self.since = index, [], time.time()
+        self.switches += 1
+        new = self.providers[index]
+        log.warning("llm provider switched", extra={"fields": {"from": old.name, "to": new.name, "model": new.model,
+                                                                "reason": reason}})
+        if index == 0:
+            self.next_probe = None
+        else:
+            self.next_probe = time.time() + self.probe_s
+            if self._prober is None or not self._prober.is_alive():
+                self._prober = threading.Thread(target=self._probe_loop, daemon=True, name="llm-probe")
+                self._prober.start()
+
+    def _probe_loop(self) -> None:
+        while not self._stop.wait(self.probe_s):
+            if self.active == 0 or self.probe_now():
+                return
+            with self._lock:
+                self.next_probe = time.time() + self.probe_s
+
+    def probe_now(self) -> bool:
+        """Probes the primary; True (and the primary asked first again) when every probe answered in time."""
+        for i in range(self.probes):
+            if i and self._stop.wait(self.probe_gap_s):
+                return False
+            if not self._probe_once(self.providers[0]):
+                log.info("llm probe failed", extra={"fields": {"provider": self.providers[0].name}})
+                return False
+        with self._lock:
+            if self.active != 0:
+                self._switch(0, f"{self.probes} probes answered in time")
+        return True
+
+    def _probe_once(self, provider: LlmProvider) -> bool:
+        conn = ProviderConnection(provider)
+        payload = {"model": provider.model, "stream": True, "max_tokens": self.PROBE_MAX_TOKENS, "temperature": 0,
+                   "messages": [{"role": "user", "content": self.PROBE_TEXT}], **provider.extra}
+        out: queue.Queue = queue.Queue()
+        attempt = _Attempt(0, conn, payload, out)
+        attempt.start()
+        try:
+            _, kind, _ = out.get(timeout=self.limit_s)
+            return kind != "error"
+        except queue.Empty:
+            return False
+        finally:
+            attempt.cancel()
+            conn.close()
+
+    def status(self) -> dict:
+        p = self.providers[self.active]
+        iso = lambda t: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t)) if t else None  # noqa: E731
+        return {"active": p.name, "model": p.model, "since": iso(self.since), "switches": self.switches,
+                "next_probe": iso(self.next_probe)}
+
+    def close(self) -> None:
+        self._stop.set()
+
+
 class LlmSession:
     """The LLM side of one call."""
 
     def __init__(self, primary: LlmProvider, secondary: LlmProvider | None, hedge_ms: int,
-                 temperature: float, max_tokens: int):
+                 temperature: float, max_tokens: int, router: ProviderRouter | None = None):
         self.conns = [ProviderConnection(primary)] + ([ProviderConnection(secondary)] if secondary else [])
-        self.check_conn = ProviderConnection(primary)  # side requests never queue behind the main stream
+        # side requests never queue behind the main stream: a connection of their own per provider
+        self.check_conns = [ProviderConnection(primary)] + ([ProviderConnection(secondary)] if secondary else [])
+        self.router = router if secondary else None
         self.hedge_s = hedge_ms / 1000
         self.temperature, self.max_tokens = temperature, max_tokens
         self.last_provider = ""
         self.usage = LlmUsage()
+
+    def _order(self) -> tuple[int, int]:
+        return self.router.order() if self.router is not None else (0, 1)
+
+    @property
+    def check_conn(self) -> ProviderConnection:
+        """Side requests go to the provider turns ask first."""
+        return self.check_conns[self._order()[0]]
 
     def warm(self, checks: bool = False) -> None:
         for conn in self.conns + ([self.check_conn] if checks else []):
             conn.warm()
 
     def close(self) -> None:
-        for conn in self.conns + [self.check_conn]:
+        for conn in self.conns + self.check_conns:
             conn.close()
 
     def check(self, system: str, text: str, max_tokens: int) -> Check:
@@ -326,11 +445,21 @@ class LlmSession:
         """Yields ("text", str) and ("tool", (name, args)) from the winning provider."""
         out: queue.Queue = queue.Queue()
         attempts: list[_Attempt] = []
+        order = self._order()  # provider indexes: the one asked first, then the hedge
+        first_conn = self.conns[order[0]]
+        reported = False
 
-        def start(i: int) -> None:  # i: provider; the attempt's index is its place in ``attempts``
-            attempt = _Attempt(len(attempts), self.conns[i], self._payload(self.conns[i], messages, tools), out)
+        def start(i: int) -> None:  # i: 0 = the provider asked first, 1 = the other; the attempt's index is
+            conn = self.conns[order[i]]  # its place in ``attempts``
+            attempt = _Attempt(len(attempts), conn, self._payload(conn, messages, tools), out)
             attempts.append(attempt)
             attempt.start()
+
+        def report(ok: bool) -> None:  # once per turn: how the provider asked first did
+            nonlocal reported
+            if self.router is not None and not reported:
+                reported = True
+                self.router.report(order[0], ok)
 
         start(0)
         started_at, winner, errors = time.monotonic(), None, []
@@ -344,6 +473,8 @@ class LlmSession:
                     start(1)
                     if on_hedge:
                         on_hedge("slow")
+                    if self.hedge_s > 0:  # with no hedge time both are always asked: nobody is "slow"
+                        report(False)
                 try:
                     index, kind, payload = out.get(timeout=POLL_S)
                 except queue.Empty:
@@ -351,6 +482,8 @@ class LlmSession:
                 if winner is not None and index != winner:
                     continue
                 if kind == "error":
+                    if not yielded and attempts[index].conn is first_conn:
+                        report(False)
                     errors.append(payload)
                     if winner is not None and yielded:
                         raise LlmError(str(payload)) from payload
@@ -369,6 +502,8 @@ class LlmSession:
                 if winner is None:
                     winner = index
                     self.last_provider = attempts[index].conn.provider.name
+                    if attempts[index].conn is first_conn:
+                        report(True)
                     for other in attempts:
                         if other.index != index:
                             other.cancel()

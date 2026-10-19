@@ -77,6 +77,8 @@ old hash.
 | `LLM_EXTRA_JSON` | `{"reasoning_effort":"low"}` for Cloud.ru | Extra request fields |
 | `LLM2_URL`, `LLM2_MODEL`, `LLM2_API_KEY`, `LLM2_EXTRA_JSON` | none | Optional secondary provider |
 | `LLM_HEDGE_MS` | 600 | Ask the secondary when the primary gives no first token in time (or fails) |
+| `LLM_FAILOVER_AFTER`, `LLM_FAILOVER_WINDOW_S` | 3, 300 | After this many slow or failed turns of the provider asked first within the window, every call asks the other provider first (0 = off); a secondary failing the same way hands the turns back |
+| `LLM_RECOVERY_PROBE_S`, `LLM_RECOVERY_PROBES` | 28800, 3 | While on the secondary, the primary is probed this often with this many short requests; all answered within `LLM_HEDGE_MS` bring it back. The state is in `/health` (`llm`) and in the `llm provider switched` log lines; a restart starts on the primary |
 | `LLM_TEMPERATURE`, `LLM_MAX_TOKENS`, `LLM_TIMEOUT` | 0.2, 400, 30 | |
 | `VA_LISTEN_PORT` | 8443 | Container port (compose publishes `VA_PUBLIC_PORT`, default 443) |
 | `VA_TLS_CERT`, `VA_TLS_KEY` | empty | Certificate chain and key; required unless behind a trusted TLS proxy |
@@ -173,7 +175,7 @@ last 31 days, at most 366) returns the calling PBX's `days` (per day and agent),
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
-| GET | `/health` | none / Bearer / Operator | public status only; a PBX Bearer receives version, latency and **its own** calls, limits and counters; the operator token receives everything with a per-tenant breakdown |
+| GET | `/health` | none / Bearer / Operator | public status only; a PBX Bearer receives version, latency and **its own** calls, limits and counters; the operator token receives everything with a per-tenant breakdown; both authenticated answers carry `llm` (the provider asked first, since when, switches, next probe) |
 | GET | `/metrics` | Operator | Prometheus metrics (series labelled by `tenant`) |
 | GET | `/v1/usage?from=&to=` | Bearer | this PBX's usage counters per UTC day and agent |
 | GET | `/v1/voices` | Bearer | loaded voices (id, name, gender, engine) and the default voice |

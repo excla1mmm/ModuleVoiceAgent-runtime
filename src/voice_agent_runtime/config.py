@@ -71,6 +71,13 @@ class Settings:
     primary: LlmProvider | None = None
     secondary: LlmProvider | None = None
     hedge_ms: int = 600
+    # Failover to the secondary for every call after this many slow or failed turns of the primary in a row
+    # (0: off); while on the secondary, the primary is probed every recovery_probe_s with recovery_probes
+    # requests, all answered within the hedge time, before it gets the turns back.
+    failover_after: int = 3
+    failover_window_s: int = 300
+    recovery_probe_s: int = 28800
+    recovery_probes: int = 3
     temperature: float = 0.2
     max_tokens: int = 400
     speculate_ms: int = 120
@@ -141,6 +148,10 @@ class Settings:
             primary=primary,
             secondary=secondary,
             hedge_ms=_int(env, "LLM_HEDGE_MS", 600, 0, 10000),
+            failover_after=_int(env, "LLM_FAILOVER_AFTER", 3, 0, 100),
+            failover_window_s=_int(env, "LLM_FAILOVER_WINDOW_S", 300, 10, 86400),
+            recovery_probe_s=_int(env, "LLM_RECOVERY_PROBE_S", 28800, 60, 604800),
+            recovery_probes=_int(env, "LLM_RECOVERY_PROBES", 3, 1, 10),
             temperature=_float(env, "LLM_TEMPERATURE", 0.2, 0.0, 2.0),
             max_tokens=_int(env, "LLM_MAX_TOKENS", 400, 50, 4000),
             speculate_ms=_int(env, "VA_SPECULATE_MS", 120, 32, 1000),

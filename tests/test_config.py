@@ -12,6 +12,13 @@ def test_defaults_use_cloud_ru_gpt_oss():
     assert s.primary.model == DEFAULT_LLM_MODEL and s.primary.extra == {"reasoning_effort": "low"}
     assert s.secondary is None and s.hedge_ms == 600 and s.turn_end_ms == 600 and s.question_end_ms == 300
     assert not s.tls_enabled and s.default_voice == "ru_RU-dmitri-medium" and not s.log_transcripts
+    assert (s.failover_after, s.failover_window_s, s.recovery_probe_s, s.recovery_probes) == (3, 300, 28800, 3)
+
+
+def test_failover_settings():
+    s = Settings.from_env({"LLM_API_KEY": "k", "LLM_FAILOVER_AFTER": "0", "LLM_FAILOVER_WINDOW_S": "120",
+                           "LLM_RECOVERY_PROBE_S": "3600", "LLM_RECOVERY_PROBES": "1"})
+    assert (s.failover_after, s.failover_window_s, s.recovery_probe_s, s.recovery_probes) == (0, 120, 3600, 1)
 
 
 def test_secondary_provider_and_errors(tmp_path):

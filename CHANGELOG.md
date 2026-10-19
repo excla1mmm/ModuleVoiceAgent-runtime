@@ -3,6 +3,11 @@
 ## Unreleased
 
 ### Added
+- Failover between the LLM providers for every call (`ProviderRouter`): after `LLM_FAILOVER_AFTER` (3) slow
+  or failed turns of the provider asked first within `LLM_FAILOVER_WINDOW_S` (300 s) every call asks the other
+  one first, with no hedge wait; the primary is probed every `LLM_RECOVERY_PROBE_S` (8 h) with
+  `LLM_RECOVERY_PROBES` (3) short requests and gets the turns back when all answer in time. The topic filter
+  follows the provider asked first. `/health` shows the state under `llm`.
 - Topic filter (`topic.py`, `VA_TOPIC_FILTER`, on by default): a short side request to the primary provider
   (temperature 0, ~300 input / ~23 output tokens) per caller phrase decides whether it concerns the company. It
   runs in parallel with the answer (~0.2 s, before the answer's first token in almost every turn) and holds its
