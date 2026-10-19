@@ -90,6 +90,7 @@ old hash.
 | `VA_MAX_AGENTS_PER_TENANT` | 20 | Bundles one PBX may load (429 `too_many_agents`); `max_agents` in tenants.json overrides it |
 | `VA_MAX_RESULTS_PER_TENANT` | 1000 | Unclaimed results kept per PBX; the oldest are evicted |
 | `VA_WS_HEARTBEAT` | 20 | WebSocket ping interval, s; a half-open media link frees its slot. 0 = off |
+| `VA_HANDOFF_FILE` | `/data/handoff.json` | Bundles saved before a restart without a peer (`deploy.sh --restart`), loaded and deleted at start; a file older than 10 minutes is deleted unread; empty disables |
 | `VA_DRAIN_SECONDS` | 30 | On SIGTERM new calls get 503, active calls get this long, then hang up with `fallback_reason=runtime_shutdown`. Keep `stop_grace_period` above it (compose: 45s) |
 | `VA_PHRASE_CACHE_MB` | 256 | Synthesized phrase cache (greetings, service phrases), MB |
 | `VA_ADMIN_TOKEN` (`VA_ADMIN_TOKEN_FILE`) | empty | Operator Bearer token for `/metrics` and the full `/health`; empty = operator endpoints disabled |
@@ -259,8 +260,10 @@ volumes (usage counters are added up, not overwritten).
 Requirements: `VA_ADMIN_TOKEN` in `.env` (the instances authenticate each other; it never reaches the PBXs),
 TLS files readable by uid 10002 (as for the single container), and RAM for two runtimes during the update:
 the script refuses below `VA_DEPLOY_MIN_FREE_MB` (2300) of available memory. On a smaller host
-`scripts/deploy.sh --build --restart` waits for a moment without calls, stops the old instance and starts
-the new one: calls during the start (about a minute) go to the PBX fallback numbers. `VA_PUBLIC_BIND`
+`scripts/deploy.sh --build --restart` waits for a moment without calls, saves the old instance's bundles to the
+data volume (`voice-agent-runtime save-bundles`, `VA_HANDOFF_FILE`, owner-only file), stops it and starts the
+new one, which loads them and deletes the file before it reports ready: the first calls after the start find
+their agents. Calls during the start (about a minute) go to the PBX fallback numbers. `VA_PUBLIC_BIND`
 defaults to `127.0.0.1` as in `compose.yaml`; set it to `0.0.0.0` when the PBXs connect to this host directly.
 A renewed certificate: `docker compose -f compose.bluegreen.yaml exec proxy caddy reload --config /etc/caddy/Caddyfile`
 (active calls are kept).
@@ -270,7 +273,9 @@ Moving from `compose.yaml`: add `VA_ADMIN_TOKEN` (and `VA_PUBLIC_BIND=0.0.0.0` i
 within seconds (the module notices the new `boot_id`).
 
 The PBX module (from this version on) asks `/health` every 10 seconds and pushes its bundles as soon as the
-`boot_id` changes, and after a call that found no bundle, so a plain restart heals within seconds too.
+`boot_id` changes, and after a call that found no bundle, so a plain restart heals within seconds too. A call
+that comes within 30 s after a start, before its PBX pushed the bundle again, waits up to 10 s for it (the caller
+hears silence) instead of going to the fallback number at once.
 
 ### Result delivery and upgrades
 

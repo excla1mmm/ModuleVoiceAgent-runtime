@@ -113,6 +113,9 @@ class Settings:
     # The other instance of a blue-green pair (http://runtime-green:8443): bundles are taken over from it at
     # start, and results and acknowledgements of calls it served are forwarded to it. Needs VA_ADMIN_TOKEN.
     peer_url: str = ""
+    # Bundles saved by the instance before a restart without a peer (scripts/deploy.sh --restart), loaded and
+    # deleted at start; None disables. On the data volume both colors share.
+    handoff_file: Path | None = Path("/data/handoff.json")
 
     @property
     def tls_enabled(self) -> bool:
@@ -129,6 +132,7 @@ class Settings:
         usage_db = env.get("VA_USAGE_DB", "/data/usage.sqlite3").strip()  # empty: usage counted in RAM only
         voices = voices_from_env(env)
         peer_url = env.get("VA_PEER_URL", "").strip().rstrip("/")
+        handoff_file = env.get("VA_HANDOFF_FILE", "/data/handoff.json").strip()
         if peer_url and not peer_url.startswith(("http://", "https://")):
             raise ConfigError("VA_PEER_URL must be an http(s) URL")
         admin_token = _secret(env, "VA_ADMIN_TOKEN")
@@ -185,6 +189,7 @@ class Settings:
             usage_db=Path(usage_db) if usage_db else None,
             usage_flush_s=_int(env, "VA_USAGE_FLUSH_SECONDS", 30, 1, 3600),
             peer_url=peer_url,
+            handoff_file=Path(handoff_file) if handoff_file else None,
         )
 
 

@@ -149,6 +149,30 @@ def status() -> int:
     return 0
 
 
+def save_bundles() -> int:
+    """Saves this instance's bundles to VA_HANDOFF_FILE for the instance that replaces it after a restart
+    without a peer (scripts/deploy.sh --restart); that one loads the file at start and deletes it."""
+    token = _admin_token()
+    if not token:
+        return 2
+    path = Settings.from_env().handoff_file
+    if path is None:
+        print("VA_HANDOFF_FILE is empty: nothing saved", file=sys.stderr)
+        return 2
+    try:
+        body = _request(_local_url("/internal/handoff"), token=token)
+    except (OSError, ValueError) as exc:
+        print(f"handoff failed: {exc}", file=sys.stderr)
+        return 1
+    tmp = path.with_name(path.name + ".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)  # bundles name employees: owner only
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(body, f, ensure_ascii=False)
+    os.replace(tmp, path)
+    print(json.dumps({"saved_bundles": len(body.get("bundles") or []), "file": str(path)}))
+    return 0
+
+
 def drain_calls(wait_s: int, settle_s: int) -> int:
     """Stops taking new calls, waits up to ``wait_s`` for the active calls to end and then up to ``settle_s``
     for the PBXs to collect their results. Exit 0: nothing left; 3: timed out (stopping now drops what is left)."""
@@ -192,6 +216,7 @@ def main(argv: list[str] | None = None) -> int:
     p_health.add_argument("--url")
     p_health.add_argument("--ready", action="store_true", help="check readiness for calls instead of liveness")
     sub.add_parser("status", help="print active calls, unclaimed results and readiness as JSON (operator token)")
+    sub.add_parser("save-bundles", help="save the bundles for the next instance of a restart (deploy.sh --restart)")
     p_drain = sub.add_parser("drain", help="stop taking calls and wait until the active ones end (blue-green deploy)")
     p_drain.add_argument("--wait", type=int, default=1860, help="max seconds for active calls (default 1860)")
     p_drain.add_argument("--settle", type=int, default=60, help="max seconds for results after the calls (default 60)")
@@ -204,6 +229,8 @@ def main(argv: list[str] | None = None) -> int:
         return hash_token(args.token)
     if args.command == "status":
         return status()
+    if args.command == "save-bundles":
+        return save_bundles()
     if args.command == "drain":
         return drain_calls(args.wait, args.settle)
     if args.ready:

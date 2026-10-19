@@ -51,6 +51,7 @@ def make_runtime(**settings):
     settings.setdefault("admin_token", ADMIN)
     settings.setdefault("aec", False)  # synthetic test audio; the canceller has its own tests
     settings.setdefault("topic_filter", False)  # no side LLM requests; the filter has its own tests
+    settings.setdefault("handoff_file", None)  # never the real /data; the handoff tests pass a file of their own
     return Runtime(Settings(primary=provider, **settings), registry, SilentEngines(), BundleStore(),
                    ResultStore(900), Metrics())
 
@@ -223,6 +224,7 @@ def test_media_requires_basic_auth():
 
 def test_missing_bundle_plays_unavailable_phrase_and_hangs_up_with_fallback():
     async def check(client, runtime):
+        runtime.ready_at -= 60  # long after the start: a missing bundle is not waited for
         ws, frames, commands = await _media_call(client, "/media?callerid=79991234567&callid=c-9&agent=3", basic())
         assert ws.protocol == "media"
         assert frames and all(len(f) == 320 for f in frames)
@@ -231,6 +233,24 @@ def test_missing_bundle_plays_unavailable_phrase_and_hangs_up_with_fallback():
         result = await resp.json()
         assert result["outcome"] == "fallback" and result["fallback_reason"] == "bundle_missing"
         assert result["caller"] == "79991234567" and result["turns"] == []
+    run(check)
+
+
+def test_call_right_after_the_start_waits_for_its_bundle():
+    async def check(client, runtime):
+        async def push_later():
+            await asyncio.sleep(0.6)  # the PBX notices the new instance and pushes its bundles
+            assert (await client.put("/v1/agents/3", json=bundle_data(), headers=bearer())).status == 200
+        pusher = asyncio.create_task(push_later())
+        ws = await client.ws_connect("/media?callerid=79991234567&callid=c-w&agent=3", headers=basic(),
+                                     protocols=("media",))
+        await ws.send_str("MEDIA_START connection_id:c1 format:slin optimal_frame_size:320 ptime:20")
+        greeting = [await asyncio.wait_for(ws.receive(), 5) for _ in range(3)]
+        assert all(m.type == WSMsgType.BINARY for m in greeting)
+        await ws.close()
+        await pusher
+        result = await (await client.get("/v1/calls/c-w/result?wait=2", headers=bearer())).json()
+        assert result["outcome"] != "fallback" and result.get("fallback_reason") != "bundle_missing"
     run(check)
 
 

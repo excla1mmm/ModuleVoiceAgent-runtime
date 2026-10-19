@@ -109,7 +109,7 @@ def test_take_over_keeps_newer_pushes_and_skips_unknown_tenants_and_bad_bundles(
         green.bundles = type(green.bundles)()
         green.bundles.put("pbx-acme", parse_bundle("3", bundle_data(version="v2")), bundle_data(version="v2"))
         green.tenants = TenantRegistry.from_mapping({"tenants": [{"id": "pbx-acme", "token_sha256": token_hash("x")}]})
-        assert await take_over(green) == 0
+        assert await take_over(green, await green.peer.bundles()) == 0
         assert green.bundles.get("pbx-acme", "3").bundle.version == "v2"  # the PBX pushed it here meanwhile
         assert green.bundles.get("pbx-other", "5") is None and green.bundles.get("pbx-acme", "6") is None
     pair(check)
@@ -221,3 +221,78 @@ echo json_encode([$h['boot_id'], in_array('handoff', $h['capabilities'], true),
     SyncService::runtimeChanged($c, $h['boot_id']), SyncService::runtimeChanged($c, 'previous-instance')]);"""
     out = json.loads(run_php(tmp_path, script, lambda runtime: boot.setdefault("id", runtime.boot_id)))
     assert out == [boot["id"], True, False, True]
+
+
+def test_cli_save_bundles_writes_a_private_file(tmp_path, capsys):
+    target = tmp_path / "handoff.json"
+    body = {"boot_id": "b", "bundles": [{"tenant": "pbx-acme", "agent_id": "3", "data": bundle_data()}]}
+    calls = []
+
+    def fake(url, method="GET", token=""):
+        calls.append((url.rsplit("/", 1)[-1], token))
+        return body
+    env = {"LLM_API_KEY": "k", "VA_ADMIN_TOKEN": "adm", "VA_HANDOFF_FILE": str(target)}
+    with patch.dict("os.environ", env, clear=True), patch.object(cli, "_request", fake):
+        assert cli.main(["save-bundles"]) == 0
+    assert calls == [("handoff", "adm")] and json.loads(target.read_text()) == body
+    assert target.stat().st_mode & 0o777 == 0o600
+    assert json.loads(capsys.readouterr().out)["saved_bundles"] == 1
+    with patch.dict("os.environ", {**env, "VA_HANDOFF_FILE": ""}, clear=True), patch.object(cli, "_request", fake):
+        assert cli.main(["save-bundles"]) == 2
+
+
+def started(runtime, check):
+    async def main():
+        async with TestClient(TestServer(build_app(runtime))) as client:
+            await until_ready(client)
+            await check(client)
+    asyncio.run(main())
+
+
+def test_saved_bundles_are_loaded_at_start_and_the_file_deleted(tmp_path):
+    path = tmp_path / "handoff.json"
+    path.write_text(json.dumps({"bundles": [
+        {"tenant": "pbx-acme", "agent_id": "3", "data": bundle_data(extension="7003")},
+        {"tenant": "pbx-nobody", "agent_id": "4", "data": bundle_data()},  # a tenant this instance does not know
+    ]}))
+    runtime = make_runtime(handoff_file=path)
+    runtime.engines = RecordingEngines()
+    assert runtime.ready is True
+
+    async def check(client):
+        assert runtime.bundles.get("pbx-acme", "3").bundle.extension == "7003"
+        assert runtime.bundles.get("pbx-nobody", "4") is None
+        assert not path.exists()  # bundles stay on disk only for the seconds of a restart
+        assert runtime.engines.spoken  # the greeting was warmed before ready
+    started(runtime, check)
+
+
+def test_an_old_saved_handoff_is_deleted_unread(tmp_path):
+    import os
+    path = tmp_path / "handoff.json"
+    path.write_text(json.dumps({"bundles": [{"tenant": "pbx-acme", "agent_id": "3", "data": bundle_data()}]}))
+    old = time.time() - 3600
+    os.utime(path, (old, old))
+    runtime = make_runtime(handoff_file=path)
+
+    async def check(client):
+        assert runtime.bundles.get("pbx-acme", "3") is None and not path.exists()
+    started(runtime, check)
+
+
+def test_restart_without_a_peer_keeps_the_agents(tmp_path):
+    """deploy.sh --restart: the old instance saves its bundles, the new one (no peer running) loads them."""
+    path = tmp_path / "handoff.json"
+
+    async def main():
+        old = make_runtime()
+        async with TestClient(TestServer(build_app(old))) as old_client:
+            assert (await old_client.put("/v1/agents/3", json=bundle_data(), headers=bearer())).status == 200
+            body = await (await old_client.get("/internal/handoff", headers=admin())).json()
+        path.write_text(json.dumps(body))  # what save-bundles writes
+        new = make_runtime(handoff_file=path, peer_url=f"http://127.0.0.1:{free_port()}")  # the peer is stopped
+        new.engines = RecordingEngines()
+        async with TestClient(TestServer(build_app(new))) as new_client:
+            await until_ready(new_client)
+            assert new.bundles.get("pbx-acme", "3") is not None and not path.exists()
+    asyncio.run(main())

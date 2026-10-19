@@ -63,6 +63,7 @@ def run(check, tmp_path):
 
 def test_call_is_metered_and_reported_to_its_tenant_only(tmp_path):
     async def check(client, runtime):
+        runtime.ready_at -= 60  # long after the start: the missing bundle is not waited for
         await _media_call(client, "/media?callerid=79991234567&callid=u-1&agent=3", basic())  # no bundle: fallback
         await client.get("/v1/calls/u-1/result?wait=1", headers=bearer())
         await asyncio.sleep(0.05)

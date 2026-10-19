@@ -12,8 +12,9 @@
 #
 # Two runtimes need RAM for two: the script refuses below VA_DEPLOY_MIN_FREE_MB of MemAvailable. --restart is
 # the fallback for a small host: it waits for a moment without calls and without results the PBXs have not
-# collected yet (up to VA_DEPLOY_IDLE_WAIT seconds), stops the old instance and starts the new one; calls during
-# the start (about a minute) go to the PBX fallback numbers. Waiting for the results matters: a draining
+# collected yet (up to VA_DEPLOY_IDLE_WAIT seconds), saves its bundles to the data volume, stops it and starts
+# the new one, which loads them (and deletes the file) before it is ready; calls during the start (about a
+# minute) go to the PBX fallback numbers. Waiting for the results matters: a draining
 # instance is no longer "ready", the proxy stops sending it requests, and with no second instance a PBX that
 # collects the result of a call that has just ended gets an error and the result is lost.
 set -euo pipefail
@@ -88,6 +89,8 @@ if [[ "$RESTART" == 1 || -z "$old" ]]; then
       sleep 2
     done
     in_runtime "$old" drain --wait 0 --settle 20 || true
+    # the new instance loads them before it is ready: calls right after the start find their agents
+    in_runtime "$old" save-bundles || log "bundles not saved: the PBXs push them again within ~10 s"
     compose stop "runtime-$old"
   fi
   log "starting $new"

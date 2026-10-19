@@ -3,6 +3,11 @@
 ## Unreleased
 
 ### Added
+- Restarts keep the agents: `deploy.sh --restart` saves the old instance's bundles to the data volume
+  (`voice-agent-runtime save-bundles`, `VA_HANDOFF_FILE`), and the new instance loads them and deletes the file
+  before it reports ready. A call that comes within 30 s after a start, before its PBX pushed the bundle again,
+  waits up to 10 s for it instead of going to the fallback number at once (a call right after a restart heard
+  "сервис временно недоступен" and went to a fallback number nobody answered).
 - Failover between the LLM providers for every call (`ProviderRouter`): after `LLM_FAILOVER_AFTER` (3) slow
   or failed turns of the provider asked first within `LLM_FAILOVER_WINDOW_S` (300 s) every call asks the other
   one first, with no hedge wait; the primary is probed every `LLM_RECOVERY_PROBE_S` (8 h) with

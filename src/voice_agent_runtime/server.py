@@ -32,6 +32,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import io
+import json
 import logging
 import ssl
 import time
@@ -41,6 +42,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 
 from aiohttp import web
 
@@ -66,6 +68,11 @@ DRAIN_POLL_S = 0.2
 MAX_USAGE_DAYS = 366
 DEFAULT_USAGE_DAYS = 31
 TAKEOVER_WARM_S = 120.0  # how long a new instance waits for the greetings of taken-over bundles
+HANDOFF_FILE_MAX_AGE_S = 600.0  # an older saved handoff (a restart that failed long ago) is not loaded
+# Right after a start the PBXs push their bundles within one heartbeat (~10 s): a call whose bundle is not
+# there yet waits for it instead of going to the fallback number at once, within this window after ready.
+STARTUP_WINDOW_S = 30.0
+STARTUP_BUNDLE_WAIT_S = 10.0
 # What this version can do, for the PBX module (GET /health): features the module would otherwise detect by 404.
 CAPABILITIES = ("result_ack", "usage", "voices", "voice_samples", "off_hours", "hotwords", "ready", "handoff")
 SAMPLE_TEXT = "Здравствуйте! Вы позвонили в нашу компанию. Чем могу помочь?"
@@ -89,6 +96,7 @@ class Runtime:
     usage: UsageMeter = field(default_factory=lambda: UsageMeter(None))  # billing counters (usage.py)
     boot_id: str = field(default_factory=lambda: uuid.uuid4().hex)  # a new instance: the PBX pushes its bundles at once
     ready: bool = True  # False while a new instance takes bundles over from its peer (GET /ready)
+    ready_at: float = field(default_factory=time.monotonic)  # when it became ready (monotonic)
     peer: Peer | None = None
     router: ProviderRouter | None = None  # which LLM provider calls ask first (failover), None: always the primary
 
@@ -373,11 +381,33 @@ async def drain_calls(request: web.Request) -> web.Response:
                               "pending_results": rt.results.pending_count()})
 
 
-async def take_over(rt: Runtime) -> int:
-    """Loads the peer's bundles (those a PBX has not pushed here meanwhile) and warms their greetings."""
+def read_handoff_file(path: Path) -> list[dict]:
+    """The bundles the previous instance saved before a restart (``voice-agent-runtime save-bundles``). The file
+    is deleted at once: bundles stay on disk only for the seconds of a restart. A file older than
+    HANDOFF_FILE_MAX_AGE_S (a restart that failed long ago) is deleted unread."""
+    try:
+        age = time.time() - path.stat().st_mtime
+        try:
+            if age > HANDOFF_FILE_MAX_AGE_S:
+                log.warning("saved bundles ignored: %d s old", age)
+                return []
+            body = json.loads(path.read_text(encoding="utf-8"))
+        finally:
+            path.unlink(missing_ok=True)
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError) as exc:
+        log.warning("saved bundles unreadable: %s", exc)
+        return []
+    items = body.get("bundles") if isinstance(body, dict) else None
+    return [i for i in items if isinstance(i, dict)] if isinstance(items, list) else []
+
+
+async def take_over(rt: Runtime, items: list[dict]) -> int:
+    """Loads handed-over bundles (those a PBX has not pushed here meanwhile) and warms their greetings."""
     loop = asyncio.get_running_loop()
     taken, warming = 0, []
-    for item in await rt.peer.bundles():
+    for item in items:
         tenant, agent_id, data = str(item.get("tenant", "")), str(item.get("agent_id", "")), item.get("data")
         if rt.tenants.get(tenant) is None or rt.bundles.has(tenant, agent_id):
             continue
@@ -398,27 +428,36 @@ async def take_over(rt: Runtime) -> int:
 
 
 async def peer_ctx(app: web.Application):
-    """With a peer: not ready until its bundles are taken over, so the load balancer sends no call too early."""
+    """With a peer or bundles saved before a restart: not ready until the bundles are taken over, so the load
+    balancer sends no call too early."""
     rt = app[RUNTIME]
-    if not rt.settings.peer_url:
+    saved = rt.settings.handoff_file is not None and rt.settings.handoff_file.exists()
+    if not rt.settings.peer_url and not saved:
         yield
         return
-    rt.peer = rt.peer or Peer(rt.settings.peer_url, rt.settings.admin_token)
+    if rt.settings.peer_url:
+        rt.peer = rt.peer or Peer(rt.settings.peer_url, rt.settings.admin_token)
     rt.ready = False
 
     async def start() -> None:
         try:
-            taken = await take_over(rt)
-            log.info("ready", extra={"fields": {"bundles_taken_over": taken, "peer": rt.settings.peer_url}})
-        except Exception:  # noqa: BLE001 - without the peer's bundles the PBXs push them again
+            items = read_handoff_file(rt.settings.handoff_file) if saved else []
+            from_file = len(items)
+            if rt.peer is not None:
+                items += await rt.peer.bundles()
+            taken = await take_over(rt, items)
+            log.info("ready", extra={"fields": {"bundles_taken_over": taken, "saved_bundles": from_file,
+                                                "peer": rt.settings.peer_url}})
+        except Exception:  # noqa: BLE001 - without the handed-over bundles the PBXs push them again
             log.exception("taking bundles over failed")
-        rt.ready = True
+        rt.ready, rt.ready_at = True, time.monotonic()
     task = asyncio.create_task(start())
     yield
     task.cancel()
     with suppress(asyncio.CancelledError):
         await task
-    await rt.peer.close()
+    if rt.peer is not None:
+        await rt.peer.close()
 
 
 async def maintenance(app: web.Application):
@@ -486,7 +525,7 @@ async def media(request: web.Request) -> web.StreamResponse:
     session = None
     try:
         await ws.prepare(request)
-        stored = rt.bundles.get(tenant, params.agent_id)
+        stored = rt.bundles.get(tenant, params.agent_id) or await _wait_for_bundle(rt, tenant, params.agent_id)
         reason = "bundle_missing" if stored is None else None
         session = CallSession(rt, ws, tenant, params, stored.bundle if stored else None,
                               stored.static_prompt if stored else "", reason, stored.terms if stored else ())
@@ -500,6 +539,24 @@ async def media(request: web.Request) -> web.StreamResponse:
         rt.sessions.discard(session)
         rt.metrics.call_ended(tenant)
     return ws
+
+
+async def _wait_for_bundle(rt: Runtime, tenant: str, agent_id: str):
+    """A call that came right after a start, before its PBX pushed the bundle again, waits for it (up to
+    STARTUP_BUNDLE_WAIT_S, within STARTUP_WINDOW_S after ready) instead of going to the fallback number at once.
+    Asterisk has already connected (its connection timeout is ~2 s), so the caller hears silence meanwhile."""
+    deadline = min(time.monotonic() + STARTUP_BUNDLE_WAIT_S, rt.ready_at + STARTUP_WINDOW_S)
+    if time.monotonic() >= deadline:
+        return None
+    started = time.monotonic()
+    while time.monotonic() < deadline:
+        await asyncio.sleep(0.2)
+        stored = rt.bundles.get(tenant, agent_id)
+        if stored is not None:
+            log.info("bundle arrived for a waiting call", extra={"fields": {
+                "tenant": tenant, "agent": agent_id, "waited_ms": round((time.monotonic() - started) * 1000)}})
+            return stored
+    return None
 
 
 async def drain(runtime: Runtime, timeout_s: float) -> None:
