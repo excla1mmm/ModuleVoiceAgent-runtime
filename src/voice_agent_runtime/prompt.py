@@ -11,6 +11,8 @@ entries), 96% at 14k, wrong-extension transfers from ~27k. ``estimate_tokens`` m
 
 from __future__ import annotations
 
+from datetime import datetime
+
 import json
 import math
 import re
@@ -144,7 +146,9 @@ def _rules(bundle: AgentBundle) -> list[str]:
             "предложение; на жалобу или реплику вроде «дорого» просто ответь. Когда всё известно, коротко "
             "повтори данные и вызови request_callback. Не придумывай значения: имя, время и вопрос записывай "
             "только со слов клиента, а если чего-то не хватает — спроси. Имя и удобное время можно спросить "
-            "одним вопросом. Чужой номер записывай полностью, 10–11 цифр. Одна заявка — один номер. Не говори "
+            "одним вопросом. Время спрашивай открытым вопросом («Когда вам удобно, чтобы мы перезвонили?»), "
+            "свои варианты и часы работы не предлагай; любое названное время («завтра», «в три», «19 октября в "
+            "15:00») записывай как сказано и не переспрашивай. Чужой номер записывай полностью, 10–11 цифр. Одна заявка — один номер. Не говори "
             "«записал», если не вызываешь request_callback в этом же ответе; если в ответе есть вопрос, "
             "request_callback не вызывай — дождись ответа.")
     else:
@@ -187,8 +191,20 @@ def static_prompt(bundle: AgentBundle) -> str:
     return "\n".join(lines)
 
 
-def system_prompt(static: str, caller: str) -> str:
-    return static + f"\n\nНомер, с которого звонит клиент: {caller or 'неизвестен'}."
+WEEKDAYS = ("понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье")
+MONTHS = ("января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября",
+          "ноября", "декабря")
+
+
+def system_prompt(static: str, caller: str, now: datetime | None = None) -> str:
+    """The call's prompt: the static part, the date and time (call 17: "сейчас рабочее время?" on a Sunday was
+    answered "да") and the caller's number."""
+    when = ""
+    if now is not None:
+        when = (f"\n\nСейчас {WEEKDAYS[now.weekday()]}, {now.day} {MONTHS[now.month - 1]} {now.year} года, "
+                f"{now:%H:%M}. На вопросы о дате, дне недели и о том, работает ли сейчас компания, отвечай по этому "
+                "времени и по графику работы из «Справки».")
+    return static + when + f"\n\nНомер, с которого звонит клиент: {caller or 'неизвестен'}."
 
 
 def prompt_tokens(bundle: AgentBundle) -> int:

@@ -95,3 +95,12 @@ def test_voice_catalog_has_commercial_voices_only():
     assert all(v.id == key and v.engine in ("piper", "silero") and v.gender in ("male", "female") and v.name
                for key, v in VOICES.items())
     assert all(v.speaker.startswith("ru_") for v in VOICES.values() if v.engine == "silero")
+
+
+def test_topic_filter_and_timezone():
+    s = Settings.from_env({"LLM_API_KEY": "k"})
+    assert s.topic_filter and s.timezone == "Europe/Moscow"
+    s = Settings.from_env({"LLM_API_KEY": "k", "VA_TOPIC_FILTER": "false", "VA_TIMEZONE": "Asia/Yekaterinburg"})
+    assert not s.topic_filter and s.timezone == "Asia/Yekaterinburg"
+    with pytest.raises(ConfigError):
+        Settings.from_env({"LLM_API_KEY": "k", "VA_TIMEZONE": "Mars/Base"})

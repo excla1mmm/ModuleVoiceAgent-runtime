@@ -8,7 +8,9 @@
   is cut.
 * ``end_call`` without a farewell, an explicit request to end the call ("заверши звонок", "сбрось", "хватит
   уже", "уйди") or "ничем" / "нет" in answer to "Чем ещё могу помочь?" becomes "Хорошо. Чем ещё могу помочь?"
-  ("нет, спасибо" answering an offer is not the end of the conversation).
+  ("нет, спасибо" answering an offer is not the end of the conversation). After "Чем ещё могу помочь?" a reply
+  without a question that the model answered with a farewell ("Всё так." -> "Спасибо, всего доброго!") ends it:
+  the farewell has already been said.
 * it sometimes narrates an action instead of calling the tool (``*Звонок завершён.*``): text between single
   asterisks is not said; ``**bold**`` markers are dropped and the words kept. A reply left empty asks what else
   the caller needs.
@@ -18,7 +20,15 @@
 * tool arguments printed as text (``...{"phrase": ..., "extension": "2588"}``) are not said.
 * ``request_callback`` only after the caller asked for it or accepted an offer; incomplete requests are not
   saved, the first missing field is asked by us. A name the caller never said ("Клиент") or a time when the
-  caller named none ("сейчас" made up) counts as missing; no second confirmation when the model confirmed.
+  caller named none ("сейчас" made up) or a placeholder time ("не уточнено") counts as missing; a callback the
+  caller asked for earlier in the call ("давай заявочку оставим") is not offered again; no second confirmation
+  when the model confirmed. A topic made only of callback words ("перезвонить клиенту") is asked for, one that
+  names something ("заявка на обратный звонок с отделом продаж") is not (call 18). While a callback is being
+  arranged, a transfer the caller did not ask for in so many words becomes an offer.
+* a stutter of the model ("Внутерьний внутренний внутренний... Внутренний номер") is not said: a clause
+  with one word three times in a row.
+* a transfer turned into an offer names whom the model wanted to transfer to (call 19: "есть у вас Егор?"
+  was answered with the generic "Соединить вас с менеджером...?").
 * special tokens and filler of the model (``<|start|>assistant``, ``(ожидаем)......``) are not said. One callback per call: later calls update it.
 """
 
@@ -67,8 +77,13 @@ PHRASES = {
     "ask_name_and_time": "Как к вам обращаться и когда вам удобно, чтобы мы перезвонили?",
     "ask_phone_full": "Продиктуйте, пожалуйста, номер полностью, вместе с кодом.",
     "ask_topic": "По какому вопросу вам перезвонить?",
+    "offer_named": "Могу соединить: {name}. Соединить?",
 }
 CALLBACK_FIELDS = ("name", "phone", "preferred_time", "topic")
+# words of a callback request itself: a topic made only of them says nothing about the caller's question
+CALLBACK_WORD = re.compile(r"перезвон|позвон|обратн|звон|заявк|клиент|абонент|запрос|вопрос|связ|просьб|оставит|"
+                           r"оформ|нужн|хоч", re.I)
+PLACEHOLDER_TIME = re.compile(r"не\s*(?:уточн|указ|известн|определ|назван)|неизвестн|уточнит|\?", re.I)
 PLACEHOLDER_NAMES = {"клиент", "абонент", "звонящий", "гость", "пользователь", "неизвестно", "не указано", "аноним"}
 # a time the caller named: words, or numbers that look like a time or a date (not the digits of a phone)
 TIME_SAID = re.compile(r"\b\d{1,2}[:.]\d{2}\b|\bв\s+\d{1,2}\b|\b\d{1,2}\s*(?:час|ч\b)|\b\d{1,2}[./]\d{1,2}\b"
@@ -119,7 +134,7 @@ class ReplyFilter:
     def _emit(self, clauses: list[str]) -> list[str]:
         out = [c for c in (GLUED_REMARK.sub("", re.sub(r"\s+", " ", INVISIBLE.sub("", self._unstaged(c)))).strip()
                            for c in clauses)
-               if c and not english_note(c)]
+               if c and not english_note(c) and not stutter(c)]
         self.said += out
         return out
 
@@ -176,6 +191,16 @@ def options_phrase(queue_names: list[str]) -> str:
     return PHRASES["options"].format(names=", ".join(names[:8]))
 
 
+def stutter(clause: str) -> bool:
+    """A word (4 letters or more) three times in a row, endings aside: the model looping, not speech."""
+    stems = [w[:4] for w in re.findall(r"[а-яёa-z]+", clause.lower())]
+    return any(len(a) == 4 and a == b == c for a, b, c in zip(stems, stems[1:], stems[2:], strict=False))
+
+
+def named_offer(name: str) -> str:
+    return PHRASES["offer_named"].format(name=name)
+
+
 def english_note(clause: str) -> bool:
     """An English reasoning note rather than speech: three Latin words or more and over twice as many Latin
     letters as Cyrillic ones (brand names inside a Russian sentence stay)."""
@@ -195,7 +220,8 @@ def missing_callback_fields(data: dict, said: str | None = None) -> list[str]:
     """Fields still to ask; with ``said`` (everything the caller said in the call) a name or time the model
     made up counts as missing."""
     missing = [k for k in CALLBACK_FIELDS if not str(data.get(k, "")).strip()]
-    if "topic" not in missing and re.search(r"перезвон|обратн\w*\s+звон", str(data["topic"]), re.I):
+    if "topic" not in missing and not any(len(w) >= 4 and not CALLBACK_WORD.match(w)
+                                          for w in re.findall(r"[а-яёa-z0-9]+", str(data["topic"]).lower())):
         missing.append("topic")  # "перезвонить клиенту" is the request itself, not the caller's question
     if said is not None:
         heard = {w[:4] for w in re.findall(r"[а-яёa-z]{3,}", said.lower())}
@@ -203,7 +229,8 @@ def missing_callback_fields(data: dict, said: str | None = None) -> list[str]:
         if "name" not in missing and (not name_words or str(data["name"]).strip().lower() in PLACEHOLDER_NAMES
                                       or not any(w[:4] in heard for w in name_words)):
             missing.append("name")
-        if "preferred_time" not in missing and not TIME_SAID.search(said):
+        if "preferred_time" not in missing and (not TIME_SAID.search(said)
+                                                 or PLACEHOLDER_TIME.search(str(data["preferred_time"]))):
             missing.append("preferred_time")
     return [k for k in CALLBACK_FIELDS if k in missing]
 
@@ -247,6 +274,7 @@ class CallContext:
     callback_wanted: bool = False  # the caller asked for a callback or was offered one
     asked_anything_else: bool = False  # the agent's last words asked "Чем ещё могу помочь?"
     caller_said: tuple[str, ...] = ()  # the caller's earlier phrases (a callback name or time must come from them)
+    off_topic: int = 0  # off-topic phrases in a row (topic.py)
 
 
 def decide(tool: str | None, raw_args: str, caller_text: str, reply: str, ctx: CallContext) -> ToolDecision:
@@ -255,6 +283,8 @@ def decide(tool: str | None, raw_args: str, caller_text: str, reply: str, ctx: C
     if tool is None and not reply.strip():
         return ToolDecision(None, phrase=PHRASES["anything_else"])  # nothing was said (e.g. only *narration*)
     done = ctx.asked_anything_else and REFUSAL.search(caller_text) and "?" not in caller_text
+    if tool == "end_call" and ctx.asked_anything_else and "?" not in caller_text and FAREWELL.search(reply):
+        done = True  # "Всё так." after "...Чем ещё могу помочь?": the model already said goodbye
     if tool == "end_call" and not (FAREWELL.search(caller_text) or END_REQUEST.search(caller_text) or done):
         return ToolDecision(None, phrase=PHRASES["anything_else"])  # "нет, спасибо" is not a goodbye
     asked = reply.rstrip().endswith("?")
@@ -262,7 +292,8 @@ def decide(tool: str | None, raw_args: str, caller_text: str, reply: str, ctx: C
             "?" in caller_text or not EXPLICIT_TRANSFER.search(caller_text)):
         # "А какие отделы есть?": a question about the options, not a request to be connected
         return ToolDecision(None, phrase="" if asked else PHRASES["offer_transfer"], list_options=not reply.strip())
-    if tool == "transfer_call" and not EXPLICIT_TRANSFER.search(caller_text) and (reply.strip() or "?" in caller_text):
+    if tool == "transfer_call" and not EXPLICIT_TRANSFER.search(caller_text) and (
+            reply.strip() or "?" in caller_text or ctx.callback_wanted):
         return ToolDecision(None, phrase="" if asked else PHRASES["offer_transfer"])  # answered and transferred: ask
     if tool == "transfer_call":
         phrase = str(args.get("phrase", "")).strip()
@@ -270,10 +301,11 @@ def decide(tool: str | None, raw_args: str, caller_text: str, reply: str, ctx: C
             return ToolDecision(tool, args, phrase=phrase, phrase_cached=False)
         return ToolDecision(tool, args, phrase="" if reply.strip() else PHRASES["transfer"])
     if tool == "end_call":
-        return ToolDecision(tool, args, phrase=PHRASES["goodbye"])
+        return ToolDecision(tool, args, phrase="" if FAREWELL.search(reply) else PHRASES["goodbye"])
     if tool == "request_callback" and not ctx.callbacks_enabled:
         return ToolDecision(None, phrase=PHRASES["anything_else"])
-    if tool == "request_callback" and not (ctx.callback_wanted or CALLBACK_INTENT.search(caller_text)):
+    if tool == "request_callback" and not (ctx.callback_wanted or any(
+            CALLBACK_INTENT.search(said) for said in (*ctx.caller_said, caller_text))):
         ctx.callback_wanted = True  # the next "да" may go straight into the request
         return ToolDecision(None, phrase=PHRASES["offer_callback"])
     if tool == "request_callback":

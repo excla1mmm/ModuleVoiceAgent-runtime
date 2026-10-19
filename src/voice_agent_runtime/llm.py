@@ -11,6 +11,8 @@
   rejects the option (HTTP 400/422 naming it) is asked again without it and remembered for the process.
   Every request the provider accepted is counted, including dropped speculative and hedged ones; without
   reported usage the tokens are estimated (characters / 3.2) and the request is counted as estimated.
+* Checks: a short side request (the topic filter, ``check``) goes to the primary provider over a connection
+  of its own, in parallel with the turn's main stream; its tokens count in the call's usage.
 """
 
 from __future__ import annotations
@@ -227,24 +229,75 @@ class _Attempt(threading.Thread):
             self.conn.release(self.http)
 
 
+class Check:
+    """A short side request in flight; ``result`` gives its text, or None on an error or a timeout."""
+
+    def __init__(self, session: LlmSession, attempt: _Attempt, out: queue.Queue):
+        self.session, self.attempt, self.out = session, attempt, out
+        self.text: str | None = None
+        self.settled = False
+        self.started = time.monotonic()
+        self.elapsed_ms = 0
+
+    def poll(self, timeout: float = 0.0) -> bool:
+        """Waits up to ``timeout`` for the answer; True once it is settled (answered, failed or given up)."""
+        deadline = time.monotonic() + timeout
+        parts: list[str] = []
+        while not self.settled:
+            try:
+                _, kind, payload = self.out.get(timeout=max(0.0, deadline - time.monotonic()))
+            except queue.Empty:
+                return False
+            if kind == "text":
+                parts.append(payload)
+            elif kind == "done":
+                self.text = "".join(parts)
+                self._settle()
+            elif kind == "error":
+                log.info("check failed: %s", payload)
+                self._settle()
+        return True
+
+    def give_up(self) -> None:
+        if not self.settled:
+            self.attempt.cancel()
+            self._settle()
+
+    def _settle(self) -> None:
+        self.settled = True
+        self.elapsed_ms = round((time.monotonic() - self.started) * 1000)
+        self.session._account(self.attempt)
+
+
 class LlmSession:
     """The LLM side of one call."""
 
     def __init__(self, primary: LlmProvider, secondary: LlmProvider | None, hedge_ms: int,
                  temperature: float, max_tokens: int):
         self.conns = [ProviderConnection(primary)] + ([ProviderConnection(secondary)] if secondary else [])
+        self.check_conn = ProviderConnection(primary)  # side requests never queue behind the main stream
         self.hedge_s = hedge_ms / 1000
         self.temperature, self.max_tokens = temperature, max_tokens
         self.last_provider = ""
         self.usage = LlmUsage()
 
-    def warm(self) -> None:
-        for conn in self.conns:
+    def warm(self, checks: bool = False) -> None:
+        for conn in self.conns + ([self.check_conn] if checks else []):
             conn.warm()
 
     def close(self) -> None:
-        for conn in self.conns:
+        for conn in self.conns + [self.check_conn]:
             conn.close()
+
+    def check(self, system: str, text: str, max_tokens: int) -> Check:
+        """Starts a short request (temperature 0, no tools) and returns at once."""
+        p = self.check_conn.provider
+        payload = {"model": p.model, "stream": True, "max_tokens": max_tokens, "temperature": 0,
+                   "messages": [{"role": "system", "content": system}, {"role": "user", "content": text}], **p.extra}
+        out: queue.Queue = queue.Queue()
+        attempt = _Attempt(0, self.check_conn, payload, out)
+        attempt.start()
+        return Check(self, attempt, out)
 
     def _payload(self, conn: ProviderConnection, messages: list[dict], tools: list[dict]) -> dict:
         p = conn.provider

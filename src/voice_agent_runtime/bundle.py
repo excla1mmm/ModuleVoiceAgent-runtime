@@ -77,6 +77,14 @@ class AgentBundle:
             targets.add(self.fallback_extension)
         return targets
 
+    def target_name(self, extension: str) -> str:
+        """Whom a number reaches: an employee or a department queue ("" for an unknown number)."""
+        extension = re.sub(r"\D", "", extension or "")
+        entry = next((e for e in self.directory if e.number == extension), None)
+        if entry is not None:
+            return f"{entry.name}, {entry.position}" if entry.position else entry.name
+        return next((re.sub(r"\s*\([^)]*\)", "", q.name).strip() for q in self.queues if q.number == extension), "")
+
     def resolve_transfer(self, extension: str) -> str | None:
         """The number to transfer to, following "route to X" rules; None when the number is not allowed."""
         extension = re.sub(r"\D", "", extension or "")

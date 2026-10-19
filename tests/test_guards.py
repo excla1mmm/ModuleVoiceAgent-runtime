@@ -1,3 +1,4 @@
+import json
 import pytest
 
 from voice_agent_runtime.guards import (PHRASES, CallContext, ReplyFilter, callback_phone, decide, leaked_content,
@@ -122,7 +123,7 @@ def test_transfer_without_phrase_uses_the_cached_phrase():
 
 def test_callback_without_request_becomes_an_offer_then_is_accepted():
     c = ctx()
-    c.caller_said = ("Меня зовут Иван, перезвоните завтра",)
+    c.caller_said = ("Меня зовут Иван", "Завтра я свободен")
     args = '{"name":"Иван","phone":"79991234567","preferred_time":"завтра","topic":"тарифы"}'
     d = decide("request_callback", args, "Дорого у вас", "", c)
     assert d.tool is None and d.phrase == PHRASES["offer_callback"] and c.callback_wanted
@@ -304,3 +305,52 @@ def test_anything_else_counts_only_as_the_last_question():
 def test_invisible_characters_are_not_said():
     _, reply = stream(["Номер, который вы указали ранее: 897\u200b\u200b\u200b-742-765."])
     assert reply == "Номер, который вы указали ранее: 897-742-765."
+
+
+def test_a_farewell_after_anything_else_ends_the_call_once():
+    """Call 17: "...Чем ещё могу помочь?" - "Всё так." - "Спасибо, всего доброго!" + end_call."""
+    d = decide("end_call", "{}", "Всё так.", "Спасибо, всего доброго!", ctx(asked_anything_else=True))
+    assert d.tool == "end_call" and d.phrase == ""
+    assert decide("end_call", "{}", "Всё так.", "Спасибо, всего доброго!", ctx()).tool is None
+    assert decide("end_call", "{}", "А когда перезвоните?", "Всего доброго!", ctx(asked_anything_else=True)).tool is None
+    assert decide("end_call", "{}", "Всё так.", "Хорошо.", ctx(asked_anything_else=True)).tool is None
+
+
+def test_a_callback_asked_for_earlier_is_not_offered_again():
+    """Call 17: "давай заявочку оставим на обратное" - "Как к вам обращаться?" - "Меня Егор зовут."."""
+    args = json.dumps({"name": "Егор", "phone": "", "preferred_time": "", "topic": "Подбор тарифа"})
+    c = ctx(caller_said=("Ну, давай заявочку оставим на обратное. Звонок на",))
+    assert decide("request_callback", args, "Меня Егор зовут.", "", c).phrase != PHRASES["offer_callback"]
+
+
+def test_a_placeholder_time_is_asked():
+    """Call 17: preferred_time "не уточнено" passed because the caller had said "сейчас" about something else."""
+    args = json.dumps({"name": "Егор", "phone": "89774276045", "preferred_time": "не уточнено", "topic": "Тариф"})
+    c = ctx(callback_wanted=True, caller_said=("Меня Егор зовут.", "А сейчас рабочее время?"))
+    d = decide("request_callback", args, "8977 427 6045", "", c)
+    assert d.callback is None and d.phrase == PHRASES["ask_preferred_time"]
+
+
+def test_a_topic_that_names_something_is_kept():
+    """Call 18: "заявка на обратный звонок с отделом продаж" was taken for an empty topic."""
+    base = {"name": "Толик", "phone": "333", "preferred_time": "завтра"}
+    assert missing_callback_fields({**base, "topic": "заявка на обратный звонок с отделом продаж"}) == []
+    assert missing_callback_fields({**base, "topic": "перезвонить клиенту"}) == ["topic"]
+    assert missing_callback_fields({**base, "topic": "обратный звонок"}) == ["topic"]
+
+
+def test_no_transfer_without_a_request_while_a_callback_is_arranged():
+    """Call 18: "По какому вопросу вам перезвонить?" - "Хочу поговорить с отделом продаж." - transferred."""
+    args = json.dumps({"extension": "2588", "phrase": "Соединяю вас с отделом продаж"})
+    d = decide("transfer_call", args, "Хочу поговорить с отделом продаж.", "", ctx(callback_wanted=True))
+    assert d.tool is None and d.phrase == PHRASES["offer_transfer"]
+    assert decide("transfer_call", args, "Соедините с отделом продаж", "", ctx(callback_wanted=True)).tool == "transfer_call"
+
+
+def test_a_stutter_is_not_said():
+    """Call 19: "Внутерьний внутренний внутренний... Внутренний номер Дмитрия — 222."."""
+    f = ReplyFilter()
+    said = f.feed("Внутерьний внутренний внутренний... Внутренний номер Дмитрия — 222. ") + f.finish()
+    assert said == ["Внутренний номер Дмитрия —", "222."]
+    f = ReplyFilter()
+    assert f.feed("Да, да, да, конечно. ") + f.finish() == ["Да,", "да,", "да,", "конечно."]

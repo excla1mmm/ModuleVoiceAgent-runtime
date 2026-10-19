@@ -3,6 +3,15 @@
 ## Unreleased
 
 ### Added
+- Topic filter (`topic.py`, `VA_TOPIC_FILTER`, on by default): a short side request to the primary provider
+  (temperature 0, ~300 input / ~23 output tokens) per caller phrase decides whether it concerns the company. It
+  runs in parallel with the answer (~0.2 s, before the answer's first token in almost every turn) and holds its
+  audio back until the verdict; an off-topic phrase or an attempt to change the agent's rules gets a fixed
+  refusal, the third in a row an offer of a person. Short replies and answers to "name / number / time / topic"
+  questions are not checked; an error or a late verdict lets the answer through. Its tokens count in usage.
+  The LLM connections of a call are opened while the greeting plays.
+- The agent knows the date, the day of the week and the time (`VA_TIMEZONE`, default Europe/Moscow): call 17
+  answered "да" to "сейчас рабочее время?" on a Sunday.
 - Updates without dropping calls: `compose.bluegreen.yaml` (Caddy in front of `runtime-blue` / `runtime-green`)
   and `scripts/deploy.sh`. A new instance takes the bundles over from the running one (`VA_PEER_URL`,
   `GET /internal/handoff`, memory to memory) and warms the greetings before `GET /ready` answers 200; the old
@@ -29,6 +38,16 @@
   `/metrics`. `LLM_STREAM_USAGE` / `LLM2_STREAM_USAGE` turn the usage request off.
 
 ### Changed
+- Call 17: a farewell the model said after "Чем ещё могу помочь?" ("Всё так." -> "Спасибо, всего доброго!")
+  ends the call instead of going on with "Хорошо. Чем ещё могу помочь?"; no second goodbye phrase after the
+  model's own. A callback the caller asked for earlier in the call is not offered again; a placeholder time
+  ("не уточнено") is asked for.
+- Call 18: a callback topic that names something ("заявка на обратный звонок с отделом продаж") is kept; while
+  a callback is being arranged a transfer the caller did not ask for becomes an offer; the caller interrupting
+  a goodbye or transfer phrase ("Стой.") cancels the hangup; "какой сегодня день" passes the topic filter.
+- Call 19: an unrequested transfer turned into an offer names the employee or department; a stutter of the
+  model ("внутренний внутренний внутренний...") is not said; the callback time is asked with an open question
+  and taken as said; complaints to the agent pass the topic filter.
 - A hand-set stress mark ("+" before a vowel, "МИК+О") in the agent texts now reaches Silero instead of being
   turned into a space; Piper and recognition hints drop it.
 - The agent ends the call on an explicit request ("заверши звонок", "сбрось", "кладу трубку", "до встречи"), not

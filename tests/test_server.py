@@ -50,6 +50,7 @@ def make_runtime(**settings):
     provider = LlmProvider("primary", "http://127.0.0.1:9/v1/chat/completions", "m", "k")
     settings.setdefault("admin_token", ADMIN)
     settings.setdefault("aec", False)  # synthetic test audio; the canceller has its own tests
+    settings.setdefault("topic_filter", False)  # no side LLM requests; the filter has its own tests
     return Runtime(Settings(primary=provider, **settings), registry, SilentEngines(), BundleStore(),
                    ResultStore(900), Metrics())
 

@@ -11,7 +11,9 @@ caller speech over the agent that the canceller took most of, or that is only th
 ``BARGE_IN_CONFIRM_S``, after which it interrupts as before).
 Long turns are recognized incrementally (``incremental.py``): speech before an internal pause is recognized
 while the caller goes on, so the end of the turn waits only for the last phrase. Recognition is biased
-towards the agent's terms (``hotwords.py``). When the call ends its usage counters go to the usage meter.
+towards the agent's terms (``hotwords.py``). A phrase off the company's topics gets a fixed refusal instead of
+the model's answer (``topic.py``): the filter runs in parallel with the answer, whose audio waits for its
+verdict. When the call ends its usage counters go to the usage meter.
 
 Lessons kept from real calls:
 * the end-of-audio sentinel is put even when a turn fails (a lost sentinel froze calls);
@@ -32,17 +34,19 @@ import time
 import uuid
 from concurrent.futures import CancelledError, Future, ThreadPoolExecutor
 from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
 
 import numpy as np
 
 from .bundle import AgentBundle
 from .echo import ECHO_REMOVED_DB, EchoGuard, level_db, new_canceller
 from .guards import (ANYTHING_ELSE, PHRASES, TOOL_RESULTS, CallContext, ReplyFilter, ToolDecision, decide,
-                     last_question, options_phrase)
+                     last_question, named_offer, options_phrase, parse_args)
 from .hotwords import abbreviation_fixes, correct
 from .incremental import Utterance, join_pieces
 from .llm import LlmError, LlmSession
 from .normalize import normalize
+from . import topic
 from .prompt import system_prompt, tools
 from .protocol import (CMD_FLUSH_MEDIA, CMD_HANGUP, EVENT_MEDIA_START, FRAME_SECONDS, SAMPLE_RATE, CallParams,
                        MediaStart, ProtocolError, frames, parse_control)
@@ -79,6 +83,8 @@ class Turn:
         self.failed = False
         self.spoken_chars = 0
         self.future: Future | None = None
+        self.off_topic = threading.Event()  # the topic filter said "not about the company": stop the answer
+        self.held: list[str] = []  # clauses waiting for the filter's verdict
 
     def run(self) -> None:
         try:
@@ -108,27 +114,46 @@ class Turn:
             return
         messages = [{"role": "system", "content": call.system}, *call.history,
                     {"role": "user", "content": self.stt_text}]
+        check = call.topic_check(self.stt_text)
         reply_filter, tool, args = ReplyFilter(), None, ""
         try:
-            for kind, payload in call.llm.stream(messages, call.tools, self.cancelled, on_hedge=call.on_hedge):
+            for kind, payload in call.llm.stream(messages, call.tools, _Either(self.cancelled, self.off_topic),
+                                                 on_hedge=call.on_hedge):
                 if kind == "tool":
                     tool, args = payload
                     continue
                 for clause in reply_filter.feed(payload):
-                    self._say(clause)
+                    self._hold(clause, check)
+                self._settle(check, 0.0)
         except LlmError as exc:
+            if check is not None:
+                check.give_up()
             log.warning("llm failed: %s", exc, extra={"call": call.id})
             call.metrics.inc("llm_errors")
             self._fail_over()
             return
         if self.cancelled.is_set():
+            if check is not None:
+                check.give_up()
             return
-        self.provider = call.llm.last_provider
-        for clause in reply_filter.finish():
-            self._say(clause)
+        if not self.off_topic.is_set():
+            self.provider = call.llm.last_provider
+            for clause in reply_filter.finish():
+                self._hold(clause, check)
+            self._settle(check, topic.WAIT_S)
+        if self.off_topic.is_set():
+            self.context.off_topic += 1
+            self.decision = ToolDecision(None, phrase=topic.refusal(self.context.off_topic))
+            self.reply = self.decision.phrase
+            self._say(self.reply, cached=True)
+            return
         decision = decide(tool, args, self.stt_text, reply_filter.reply, self.context)
         if decision.list_options:
             decision = dataclasses.replace(decision, phrase=options_phrase([q.name for q in call.bundle.queues]))
+        if tool == "transfer_call" and decision.phrase == PHRASES["offer_transfer"]:
+            name = call.bundle.target_name(str(parse_args(args).get("extension", "")))
+            if name:  # "есть у вас Егор?": offer Егор, not "a manager"
+                decision = dataclasses.replace(decision, phrase=named_offer(name), phrase_cached=False)
         if decision.tool == "transfer_call":
             self.transfer_target = call.bundle.resolve_transfer(str(decision.args.get("extension", "")))
             if self.transfer_target is None:  # the model named a number that is not in the directory
@@ -138,6 +163,34 @@ class Turn:
             self._say(decision.phrase, cached=decision.phrase_cached)
         self.decision = decision
         self.reply = " ".join(p for p in (reply_filter.reply, decision.phrase) if p).strip()
+
+    def _hold(self, clause: str, check) -> None:
+        """Says the clause, or keeps it until the topic filter's verdict."""
+        if check is not None and not check.settled:
+            self.held.append(clause)
+        elif not self.off_topic.is_set():
+            self._say(clause)
+
+    def _settle(self, check, wait_s: float) -> None:
+        """Takes the filter's verdict if it is in (waiting up to ``wait_s``): off-topic stops the answer, anything
+        else (including no verdict in time) lets the held clauses through."""
+        if check is None or self.off_topic.is_set():
+            return
+        if not check.settled:
+            if not check.poll(wait_s) and wait_s <= 0:
+                return
+            check.give_up()  # late: the answer goes on without the verdict
+            self.timings["topic_ms"] = check.elapsed_ms
+            if topic.verdict(check.text or "") is False:
+                self.off_topic.set()
+                self.held.clear()
+                self.call.metrics.inc("off_topic")
+                return
+            if check.text is not None:
+                self.context.off_topic = 0
+        held, self.held = self.held, []
+        for clause in held:
+            self._say(clause)
 
     def _fail_over(self) -> None:
         """Both LLM providers failed: apologize and hand the caller over to a person."""
@@ -159,6 +212,16 @@ class Turn:
         self.deliver(pcm)
 
 
+class _Either:
+    """Set when either event is: the LLM stream stops on a cancelled turn or an off-topic verdict."""
+
+    def __init__(self, a: threading.Event, b: threading.Event):
+        self.a, self.b = a, b
+
+    def is_set(self) -> bool:
+        return self.a.is_set() or self.b.is_set()
+
+
 class CallSession:
     def __init__(self, runtime, ws, tenant: str, params: CallParams, bundle: AgentBundle | None,
                  static_prompt: str, unavailable_reason: str | None, terms: tuple[str, ...] = ()):
@@ -172,8 +235,10 @@ class CallSession:
         self.unavailable_reason = unavailable_reason if bundle is not None else (unavailable_reason or "bundle_missing")
         self.id = uuid.uuid4().hex[:12]  # runtime-internal id for technical logs (no phone numbers there)
         self.loop = asyncio.get_running_loop()
-        self.system = system_prompt(static_prompt, params.caller) if bundle else ""
+        self.system = system_prompt(static_prompt, params.caller,
+                                    datetime.now(ZoneInfo(self.settings.timezone))) if bundle else ""
         self.tools = tools(bundle) if bundle else []
+        self.topic_prompt = topic.filter_prompt(bundle) if bundle and self.settings.topic_filter else ""
         self.context = CallContext(caller=params.caller, callbacks_enabled=bool(bundle and bundle.callbacks_enabled))
         self.history: list[dict] = []
         self.detector = TurnDetector(HOP / SAMPLE_RATE, self.settings.speculate_ms, self.settings.turn_end_ms,
@@ -274,6 +339,8 @@ class CallSession:
         self.spoken_chars += len(self.bundle.greeting)
         self.echo.said(self.bundle.greeting)
         self.history.append({"role": "assistant", "content": self.bundle.greeting})
+        threading.Thread(target=self.llm.warm, args=(bool(self.topic_prompt),), daemon=True,
+                         name=f"warm-{self.id}").start()  # TLS handshakes off the first turn
         await self.play([greeting])
 
     def on_media(self, data: bytes) -> None:
@@ -368,11 +435,15 @@ class CallSession:
             if self.detector.turn_ended:
                 self.cancel_turn()
                 self.detector.reset_turn()
-            if self.pending_hangup is not None:
-                log.info("hangup cancelled, caller keeps talking", extra={"call": self.id})
-            self.pending_hangup = None  # "нет, подождите": keep talking instead of dropping the call
-            self.transfer = None
-            self.goodbye = False
+            self._keep_line()  # "нет, подождите": keep talking instead of dropping the call
+
+    def _keep_line(self) -> None:
+        """The caller speaks after or over a goodbye / transfer phrase: the scheduled hangup is cancelled."""
+        if self.pending_hangup is not None:
+            log.info("hangup cancelled, caller keeps talking", extra={"call": self.id})
+        self.pending_hangup = None
+        self.transfer = None
+        self.goodbye = False
 
     async def confirm_barge_in(self, segment_start: float, turn: Turn | None, playback: asyncio.Task | None) -> None:
         """Interrupts the agent unless the caller's speech so far is silence to recognition or the agent's echo."""
@@ -398,6 +469,7 @@ class CallSession:
             self.barge_next_pos = end + BARGE_IN_AUDIO_S
             return
         self.metrics.inc("barge_ins")
+        self._keep_line()  # "Стой." over "Соединяю..." (call 18): no transfer, no hangup
         if turn is not None and self.turn is turn:  # not the turn started meanwhile for the interruption
             self.cancel_turn()
         if self.playback is playback:  # not the answer to the interruption, if it is already playing
@@ -409,6 +481,14 @@ class CallSession:
             if turn is self.turn:
                 self.detector.set_transcript(text)
         self.loop.call_soon_threadsafe(apply)
+
+    def topic_check(self, text: str):
+        """Starts the topic filter on a caller phrase (None when it is off or the phrase is not worth it)."""
+        last = next((m.get("content") or "" for m in reversed(self.history) if m["role"] == "assistant"), "")
+        if not self.topic_prompt or not topic.needs_check(text, last_question(last)):
+            return None
+        self.metrics.inc("topic_checks")
+        return self.llm.check(self.topic_prompt, text, topic.MAX_TOKENS)
 
     def on_hedge(self, reason: str) -> None:
         self.metrics.inc(f"llm_hedged_{reason}")
@@ -449,6 +529,7 @@ class CallSession:
     def _commit(self, turn: Turn, sent_wall: float) -> None:
         decision = turn.decision
         self.context.callback_wanted = turn.context.callback_wanted
+        self.context.off_topic = turn.context.off_topic
         self.context.asked_anything_else = bool(ANYTHING_ELSE.search(last_question(turn.reply)))
         self.context.caller_said = (*self.context.caller_said, turn.stt_text)[-40:]
         if decision.tool and decision.tool != "fallback":

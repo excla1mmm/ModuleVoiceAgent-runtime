@@ -45,17 +45,20 @@ class Scripted(BaseHTTPRequestHandler):
     delay = 0.0
     status = 200
     body = sse(text_chunk("Ответ."))
+    check_body: bytes | None = None  # the answer to topic filter requests (None: the same as the others)
     requests: list = []
 
     def do_POST(self):
         payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         type(self).requests.append((self.headers.get("Authorization"), payload))
         time.sleep(self.delay)
+        is_check = str((payload.get("messages") or [{}])[0].get("content")).startswith("Ты фильтр")
+        body = self.check_body if is_check and self.check_body is not None else self.body
         self.send_response(self.status)
         self.send_header("Content-Type", "text/event-stream")
-        self.send_header("Content-Length", str(len(self.body)))
+        self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(self.body)
+        self.wfile.write(body)
 
     def log_message(self, *args):
         pass

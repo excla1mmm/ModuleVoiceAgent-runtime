@@ -98,6 +98,8 @@ old hash.
 | `VA_STT_CHUNK_PAUSE_MS`, `VA_STT_CHUNK_MIN_MS` | 160, 1000 | Internal pause that cuts a piece; shortest piece committed |
 | `VA_HOTWORDS` | true | Bias recognition towards the agent's terms and restore abbreviations |
 | `VA_AEC` | true | Echo cancellation of the caller audio (WebRTC AEC3 via livekit) with the agent audio as the reference; speech over the agent that it mostly removed is echo |
+| `VA_TOPIC_FILTER` | true | A short side request to the primary LLM per caller phrase (in parallel with the answer, ~0.2 s) refuses topics foreign to the company and attempts to change the agent's rules; short replies are not checked, errors let the answer through |
+| `VA_TIMEZONE` | Europe/Moscow | Time zone of the date and time the agent is told at the start of a call |
 | `VA_HOTWORD_BOOST` | 0.45 | Decoder bonus per letter of a term (0 = no decoder biasing; LocalSTTWorker found >0.75 garbles words) |
 | `VA_ASR_THREADS` | 1 | ONNX intra-op threads of the STT model |
 | `VA_SPECULATE_MS`, `VA_TURN_END_MS`, `VA_QUESTION_END_MS` | 120, 600, 300 | Turn-taking pauses |

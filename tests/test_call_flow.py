@@ -72,15 +72,17 @@ async def speak_and_wait(ws, stop_on_hangup=True, timeout=5.0, audio=(SPEECH, SI
     return commands
 
 
-def run_call(llm_body, transcripts, bundle, audio=(SPEECH, SILENCE), engines=None):
-    srv, handler = server(body=llm_body)
+def run_call(llm_body, transcripts, bundle, audio=(SPEECH, SILENCE), engines=None, check_body=None):
+    """``check_body``: the topic filter is on and its requests get this answer."""
+    srv, handler = server(body=llm_body, check_body=check_body)
 
     async def main():
         runtime = make_runtime()
         runtime.engines = engines or ScriptedEngines(transcripts)
         runtime.settings = runtime.settings.__class__(
             primary=LlmProvider("primary", f"http://127.0.0.1:{srv.server_port}/v1/chat/completions", "m", "k"),
-            aec=False)  # synthetic audio (a constant level): the high-pass filter of the canceller removes it
+            aec=False,  # synthetic audio (a constant level): the high-pass filter of the canceller removes it
+            topic_filter=check_body is not None)
         async with TestClient(TestServer(build_app(runtime))) as client:
             assert (await client.put("/v1/agents/3", json=bundle, headers=bearer())).status == 200
             ws = await client.ws_connect("/media?callerid=79991234567&callid=flow-1&agent=3", headers=basic(),
@@ -146,3 +148,12 @@ def test_long_turn_is_recognized_in_pieces_with_hotwords():
     assert "АТС" in engines.recognized[0][1]
     assert result["turns"][0]["caller"] == "Соедините меня с АТС, пожалуйста"  # pieces joined, "ТС" restored
     assert requests[0][1]["stream_options"] == {"include_usage": True}
+
+
+def test_an_unrequested_transfer_is_offered_by_name():
+    """Call 19: "есть у вас Иванова?" - the model transferred; the offer names the employee."""
+    body = sse({"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {
+        "name": "transfer_call", "arguments": json.dumps({"extension": "210", "phrase": "Соединяю."})}}]}}]})
+    (commands, result), _ = run_call(body, ["А Иванова у вас работает?"], bundle_data(transfer_grace_seconds=0))
+    assert commands == [] and result["transfer"] is None
+    assert result["turns"][0]["agent"] == "Могу соединить: Иванова Светлана Петровна, главный бухгалтер. Соединить?"

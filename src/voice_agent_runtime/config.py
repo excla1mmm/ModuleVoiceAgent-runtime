@@ -12,6 +12,7 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 DEFAULT_LLM_URL = "https://foundation-models.api.cloud.ru/v1/chat/completions"
 DEFAULT_LLM_MODEL = "openai/gpt-oss-120b"
@@ -97,6 +98,8 @@ class Settings:
     stt_chunk_min_ms: int = 1000
     hotwords: bool = True
     aec: bool = True  # echo cancellation of the caller audio (needs livekit; off without it)
+    topic_filter: bool = True  # a side LLM request per caller phrase refuses topics foreign to the company
+    timezone: str = "Europe/Moscow"  # the date and time the agent knows (VA_TIMEZONE)
     hotword_boost: float = 0.45
     usage_db: Path | None = None
     usage_flush_s: int = 30
@@ -165,6 +168,8 @@ class Settings:
             stt_chunk_min_ms=_int(env, "VA_STT_CHUNK_MIN_MS", 1000, 300, 30000),
             hotwords=_bool(env.get("VA_HOTWORDS", "true")),
             aec=_bool(env.get("VA_AEC", "true")),
+            topic_filter=_bool(env.get("VA_TOPIC_FILTER", "true")),
+            timezone=_timezone(env),
             hotword_boost=_float(env, "VA_HOTWORD_BOOST", 0.45, 0.0, 2.0),
             usage_db=Path(usage_db) if usage_db else None,
             usage_flush_s=_int(env, "VA_USAGE_FLUSH_SECONDS", 30, 1, 3600),
@@ -182,6 +187,15 @@ def voices_from_env(env: Mapping[str, str]) -> tuple[str, ...]:
     if unknown or not voices:
         raise ConfigError(f"VA_VOICES: unknown voice {', '.join(unknown) or '(empty)'}; known: {', '.join(SUPPORTED_VOICES)}")
     return voices
+
+
+def _timezone(env: Mapping[str, str]) -> str:
+    name = env.get("VA_TIMEZONE", "").strip() or "Europe/Moscow"
+    try:
+        ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise ConfigError(f"VA_TIMEZONE: unknown time zone {name!r}") from exc
+    return name
 
 
 def _secret(env: Mapping[str, str], key: str) -> str:
