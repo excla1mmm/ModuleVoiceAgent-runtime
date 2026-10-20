@@ -58,6 +58,8 @@ HOP_BYTES = HOP * 2
 KEEP_AUDIO_S = 30
 ECHO_TAIL_S = 0.5  # caller speech this soon after the agent fell silent may still be its echo (~0.33 s seen)
 BARGE_IN_CONFIRM_S = 0.8  # the longest an interruption waits for recognition
+BARGE_IN_HOLD_S = 2.0  # in the first seconds of a reply the canceller may still leave echo: no interruption
+BARGE_IN_HOLD_WAIT_S = 3.0  # ... without recognized words, however long recognition takes (up to this)
 BARGE_IN_AUDIO_S = 0.6  # caller speech collected before it is recognized (130 ms is too short to recognize)
 
 
@@ -111,6 +113,11 @@ class Turn:
         if self.echo_removed or (self.echo_possible and call.echo.is_echo(self.stt_text)):
             log.info("echo ignored", extra={"call": call.id})
             call.metrics.inc("echo_ignored")
+            return
+        if self.echo_possible and call.speaking and not call.echo.interrupts(self.stt_text):
+            # "Здравствуйте. Ну." over the agent: its own echo and a backchannel, it keeps talking
+            log.info("backchannel ignored", extra={"call": call.id})
+            call.metrics.inc("backchannel_ignored")
             return
         messages = [{"role": "system", "content": call.system}, *call.history,
                     {"role": "user", "content": self.stt_text}]
@@ -267,6 +274,7 @@ class CallSession:
         self.turn: Turn | None = None
         self.audio_q: asyncio.Queue | None = None
         self.playback: asyncio.Task | None = None
+        self.playback_started = 0.0  # loop time the current playback began
         self.pending_hangup: object | None = None
         self.frame_bytes = 320
         self.xon = asyncio.Event()
@@ -463,9 +471,14 @@ class CallSession:
             text = await asyncio.wait_for(asyncio.shield(asyncio.wrap_future(future)), BARGE_IN_CONFIRM_S)
         except TimeoutError:
             text = None  # recognition is busy with the agent's own reply: interrupt as before
+            if self.playback is playback and self.loop.time() - self.playback_started < BARGE_IN_HOLD_S:
+                try:  # ... except at the start of a reply, where it is most likely echo: wait for the words
+                    text = await asyncio.wait_for(asyncio.shield(asyncio.wrap_future(future)), BARGE_IN_HOLD_WAIT_S)
+                except Exception:  # noqa: BLE001 - still nothing: interrupt as before
+                    text = None
         except Exception:  # noqa: BLE001 - a failed recognition must not keep the agent talking over the caller
             text = None
-        if text is not None and (not text.strip() or self.echo.is_echo(text)):
+        if text is not None and not self.echo.interrupts(text):
             self.metrics.inc("barge_ins_ignored")
             self.barge_next_pos = end + BARGE_IN_AUDIO_S
             return
@@ -627,10 +640,12 @@ class CallSession:
     async def play(self, chunks: list[bytes]) -> None:
         await self.stop_playback()
         self.playback = self.loop.create_task(self._play(chunks, None))
+        self.playback_started = self.loop.time()
 
     async def play_queue(self, first: bytes, audio_q: asyncio.Queue) -> None:
         await self.stop_playback()
         self.playback = self.loop.create_task(self._play([first], audio_q))
+        self.playback_started = self.loop.time()
 
     async def _play(self, chunks: list[bytes], audio_q: asyncio.Queue | None) -> None:
         t0, n = self.loop.time(), 0

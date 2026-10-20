@@ -12,6 +12,18 @@ def test_the_agent_own_recent_words_are_echo():
     assert not guard.is_echo("Здравствуйте, мне нужен бухгалтер", now=101)
 
 
+def test_over_the_agent_only_words_of_the_caller_own_interrupt():
+    guard = EchoGuard()
+    guard.said("Здравствуйте! Мы разрабатываем бесплатную айпи-АТС.", now=100)
+    assert not guard.interrupts("Здравствуйте. Ну.", now=101)  # its echo and a backchannel
+    assert not guard.interrupts("Угу, да.", now=101)
+    assert not guard.interrupts("", now=101)
+    assert guard.interrupts("Подождите.", now=101)  # a stop word always
+    assert guard.interrupts("Нет.", now=101)
+    assert guard.interrupts("Здравствуйте, сколько стоит?", now=101)
+    assert guard.interrupts("Бухгалтерия.", now=101)
+
+
 def test_short_answers_old_phrases_and_long_speech_are_not_echo():
     guard = EchoGuard(window_s=15)
     guard.said("Да, нет, конечно. Перезвонить вам на номер, с которого вы звоните, удобно ли завтра?", now=100)

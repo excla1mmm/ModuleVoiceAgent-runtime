@@ -61,6 +61,12 @@
 - Call 20: "Да всё, наверное, больше ничем." and "Больше ничем." after "Чем ещё могу помочь?" end the call: the
   refusal may start with filler words ("больше", "наверное", "всё", "спасибо"...) and a lone "Да всё." counts too,
   instead of the agent asking "Хорошо. Чем ещё могу помочь?" again ("Всё так." still does not end it).
+- Echo and backchannels over the talking agent (call of 2026-10-20 15:07: the echo "Здравствуйте" with the
+  caller's "ну" cut the agent's answer off twice): the agent stops only for a word of the caller's own - its own
+  recent words and backchannels ("ну", "угу", "да", "алло"...) are taken out word by word, stop words ("стоп",
+  "подождите", "нет") always stop it - and such a phrase is not answered while the agent talks ("Да." right
+  after its question still is). In the first 2 s of a reply (`BARGE_IN_HOLD_S`) an interruption waits for the
+  recognized words, up to 3 s, instead of stopping the agent when recognition is slow.
 - A hand-set stress mark ("+" before a vowel, "МИК+О") in the agent texts now reaches Silero instead of being
   turned into a space; Piper and recognition hints drop it.
 - The agent ends the call on an explicit request ("заверши звонок", "сбрось", "кладу трубку", "до встречи"), not

@@ -12,6 +12,10 @@ Two layers:
 * ``EchoGuard``: remembers what the agent said lately; caller speech that started while the agent was audible
   and consists only of the agent's recent words is echo. "да" / "нет" alone are never echo by text (a word of 4
   letters or more is required), and speech that started after the agent fell silent is never checked.
+  While the agent is still talking, caller speech stops it only with a word of its own (``interrupts``): the
+  agent's recent words and backchannels ("ну", "угу", "да") are taken out word by word, and a stop word
+  ("стоп", "подождите", "нет") always counts. The call of 2026-10-20 15:07: the echo "Здравствуйте" with "ну" was one
+  phrase that was not all echo, so it cut the agent's answer off.
 """
 
 from __future__ import annotations
@@ -26,6 +30,9 @@ import numpy as np
 WINDOW_S = 15.0  # agent phrases older than this are forgotten (long replies are synthesized ahead of playback)
 MAX_WORDS = 8  # echo picked up by a microphone is a fragment, not a long sentence
 WORD = re.compile(r"[а-яa-z0-9]+")
+# Said over the agent, these neither stop it nor get an answer; the stop words always stop it.
+BACKCHANNEL = frozenset("ну угу ага да так ясно понятно хорошо ок окей мм ммм хм а э эм алло".split())
+STOP_WORDS = frozenset("стоп стой стойте подождите подожди погодите погоди секунду секундочку нет хватит".split())
 ECHO_REMOVED_DB = 6.0  # the canceller took at least this much off a phrase: it was the agent's echo
 AEC_RATE = 8000
 AEC_FRAME_BYTES = AEC_RATE // 100 * 2  # the module works on 10 ms frames of 16-bit mono
@@ -56,14 +63,26 @@ class EchoGuard:
             with self._lock:
                 self._said.append((time.monotonic() if now is None else now, words))
 
+    def _recent(self, now: float | None) -> set[str]:
+        since = (time.monotonic() if now is None else now) - self.window_s
+        with self._lock:
+            return {w for at, said in self._said if at >= since for w in said}
+
     def is_echo(self, text: str, now: float | None = None) -> bool:
         words = _words(text)
         if not words or len(words) > MAX_WORDS or not any(len(w) >= 4 for w in words):
             return False
-        since = (time.monotonic() if now is None else now) - self.window_s
-        with self._lock:
-            agent = {w for at, said in self._said if at >= since for w in said}
+        agent = self._recent(now)
         return all(any(_same(w, a) for a in agent) for w in words)
+
+    def interrupts(self, text: str, now: float | None = None) -> bool:
+        """Caller speech over the talking agent stops it: a stop word, or a word that is neither the agent's
+        recent words nor a backchannel."""
+        words = _words(text)
+        if any(w in STOP_WORDS for w in words):
+            return True
+        agent = self._recent(now)
+        return any(w not in BACKCHANNEL and not any(_same(w, a) for a in agent) for w in words)
 
 
 def level_db(pcm: np.ndarray) -> float:
