@@ -58,6 +58,9 @@
 - Call 19: an unrequested transfer turned into an offer names the employee or department; a stutter of the
   model ("внутренний внутренний внутренний...") is not said; the callback time is asked with an open question
   and taken as said; complaints to the agent pass the topic filter.
+- Call 20: "Да всё, наверное, больше ничем." and "Больше ничем." after "Чем ещё могу помочь?" end the call: the
+  refusal may start with filler words ("больше", "наверное", "всё", "спасибо"...) and a lone "Да всё." counts too,
+  instead of the agent asking "Хорошо. Чем ещё могу помочь?" again ("Всё так." still does not end it).
 - A hand-set stress mark ("+" before a vowel, "МИК+О") in the agent texts now reaches Silero instead of being
   turned into a space; Piper and recognition hints drop it.
 - The agent ends the call on an explicit request ("заверши звонок", "сбрось", "кладу трубку", "до встречи"), not

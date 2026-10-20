@@ -203,12 +203,22 @@ def test_more_ways_to_ask_to_end_the_call(text):
     assert decide("end_call", "{}", text, "", ctx()).tool == "end_call"
 
 
-@pytest.mark.parametrize("text", ["Ничем.", "Да ничем, я тебе сказал уже пять раз.", "Нет.", "Ничего не надо"])
+@pytest.mark.parametrize("text", ["Ничем.", "Да ничем, я тебе сказал уже пять раз.", "Нет.", "Ничего не надо",
+                                  # call 20
+                                  "Да всё, наверное, больше ничем.", "Больше ничем.", "Да всё.", "Всё.",
+                                  "Всё, больше ничего.", "Наверное, ничего.", "Спасибо, больше ничего не нужно.",
+                                  "Пока что ничем."])
 def test_nothing_more_after_anything_else_ends_the_call(text):
     asked = ctx()
     asked.asked_anything_else = True
     assert decide("end_call", "{}", text, "", asked).tool == "end_call"
     assert decide("end_call", "{}", text, "", ctx()).tool is None  # after an offer it is not the end
+
+
+@pytest.mark.parametrize("text", ["Всё так.", "Да всё понятно, но есть вопрос", "Больше вопросов нет?",
+                                  "Пока не знаю."])
+def test_other_answers_to_anything_else_do_not_end_the_call(text):
+    assert decide("end_call", "{}", text, "", ctx(asked_anything_else=True)).tool is None
 
 
 def test_anything_else_questions_are_recognized():
