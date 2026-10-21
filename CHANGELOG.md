@@ -67,6 +67,11 @@
   "подождите", "нет") always stop it - and such a phrase is not answered while the agent talks ("Да." right
   after its question still is). In the first 2 s of a reply (`BARGE_IN_HOLD_S`) an interruption waits for the
   recognized words, up to 3 s, instead of stopping the agent when recognition is slow.
+- Wideband calls: `MEDIA_START format:slin16` (the module dials `c(slin16)` for G.722 / Opus callers) is
+  accepted. The agent's audio is synthesized at 16 kHz (Silero at 24 kHz, Piper at its own rate, resampled), so
+  those callers hear it without the 4 kHz telephone cut-off; the caller's audio is brought down to 8 kHz
+  (`Downsampler`) before the echo canceller, VAD and recognition, which work as before. Frames are paced by their
+  real duration. Capability `slin16` in `/health`; the phrase cache keeps each rate apart.
 - A hand-set stress mark ("+" before a vowel, "МИК+О") in the agent texts now reaches Silero instead of being
   turned into a space; Piper and recognition hints drop it.
 - The agent ends the call on an explicit request ("заверши звонок", "сбрось", "кладу трубку", "до встречи"), not

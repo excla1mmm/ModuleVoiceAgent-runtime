@@ -35,11 +35,11 @@ class SilentEngines:
     def recognize(self, audio, terms=()):
         return ""
 
-    def synthesize(self, voice, text):
-        return (np.ones(800, dtype=np.int16) * 1000).tobytes()  # 100 ms
+    def synthesize(self, voice, text, rate=8000):
+        return (np.ones(rate // 10, dtype=np.int16) * 1000).tobytes()  # 100 ms
 
-    def phrase(self, voice, text):
-        return self.synthesize(voice, text)
+    def phrase(self, voice, text, rate=8000):
+        return self.synthesize(voice, text, rate)
 
 
 def make_runtime(**settings):
@@ -113,9 +113,9 @@ class RecordingEngines(SilentEngines):
     def __init__(self):
         self.spoken = []
 
-    def synthesize(self, voice, text):
+    def synthesize(self, voice, text, rate=8000):
         self.spoken.append((voice, text))
-        return b"" if text == "" else super().synthesize(voice, text)
+        return b"" if text == "" else super().synthesize(voice, text, rate)
 
 
 def test_voice_not_loaded_falls_back_to_the_default_voice():

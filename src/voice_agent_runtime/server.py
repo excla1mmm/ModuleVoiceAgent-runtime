@@ -74,7 +74,8 @@ HANDOFF_FILE_MAX_AGE_S = 600.0  # an older saved handoff (a restart that failed 
 STARTUP_WINDOW_S = 30.0
 STARTUP_BUNDLE_WAIT_S = 10.0
 # What this version can do, for the PBX module (GET /health): features the module would otherwise detect by 404.
-CAPABILITIES = ("result_ack", "usage", "voices", "voice_samples", "off_hours", "hotwords", "ready", "handoff")
+CAPABILITIES = ("result_ack", "usage", "voices", "voice_samples", "off_hours", "hotwords", "ready", "handoff",
+                "slin16")
 SAMPLE_TEXT = "Здравствуйте! Вы позвонили в нашу компанию. Чем могу помочь?"
 MAX_SAMPLE_CHARS = 300
 

@@ -50,6 +50,7 @@ from . import topic
 from .prompt import system_prompt, tools
 from .protocol import (CMD_FLUSH_MEDIA, CMD_HANGUP, EVENT_MEDIA_START, FRAME_SECONDS, SAMPLE_RATE, CallParams,
                        MediaStart, ProtocolError, frames, parse_control)
+from .speech import Downsampler
 from .turns import Event, TurnDetector
 
 log = logging.getLogger("voice_agent.call")
@@ -211,8 +212,8 @@ class Turn:
             return
         if "llm_first_ms" not in self.timings:
             self.timings["llm_first_ms"] = self._ms() - self.timings.get("stt_ms", 0)
-        engines, voice = self.call.engines, self.call.bundle.voice
-        pcm = engines.phrase(voice, text) if cached else engines.synthesize(voice, normalize(text))
+        engines, voice, rate = self.call.engines, self.call.bundle.voice, self.call.rate
+        pcm = engines.phrase(voice, text, rate) if cached else engines.synthesize(voice, normalize(text), rate)
         self.spoken_chars += len(text)
         self.call.echo.said(text)
         self.timings.setdefault("first_audio_ms", self._ms())
@@ -277,6 +278,9 @@ class CallSession:
         self.playback_started = 0.0  # loop time the current playback began
         self.pending_hangup: object | None = None
         self.frame_bytes = 320
+        self.rate = SAMPLE_RATE  # of the media on the wire: 16000 for slin16 (agent audio is synthesized at it)
+        self.down_in: Downsampler | None = None  # slin16 caller audio -> 8 kHz processing
+        self.down_out: Downsampler | None = None  # slin16 agent audio -> 8 kHz echo canceller reference
         self.xon = asyncio.Event()
         self.xon.set()
         self.started = time.time()
@@ -327,7 +331,11 @@ class CallSession:
                 await self.hangup(error=str(exc))
                 return
             self.media_started = True
-            self.frame_bytes = start.optimal_frame_size if start.optimal_frame_size % 2 == 0 else 320
+            self.rate = start.rate
+            default_frame = int(self.rate * FRAME_SECONDS) * 2
+            self.frame_bytes = start.optimal_frame_size if start.optimal_frame_size % 2 == 0 else default_frame
+            if self.rate != SAMPLE_RATE:
+                self.down_in, self.down_out = Downsampler(self.rate), Downsampler(self.rate)
             await self.start()
         elif msg.name == "MEDIA_XOFF":
             self.xon.clear()
@@ -337,14 +345,15 @@ class CallSession:
     async def start(self) -> None:
         if self.unavailable_reason is not None:
             voice = self.bundle.voice if self.bundle else self.settings.default_voice
-            pcm = await self.loop.run_in_executor(self.worker, self.engines.phrase, voice, PHRASES["unavailable"])
+            pcm = await self.loop.run_in_executor(self.worker, self.engines.phrase, voice, PHRASES["unavailable"],
+                                                  self.rate)
             self.spoken_chars += len(PHRASES["unavailable"])
             self.fallback_reason = self.unavailable_reason
             await self.play([pcm])
             self._spawn(self._hangup_after_playback(0.3))
             return
         greeting = await self.loop.run_in_executor(self.worker, self.engines.phrase, self.bundle.voice,
-                                                   normalize(self.bundle.greeting))
+                                                   normalize(self.bundle.greeting), self.rate)
         self.spoken_chars += len(self.bundle.greeting)
         self.echo.said(self.bundle.greeting)
         self.history.append({"role": "assistant", "content": self.bundle.greeting})
@@ -353,6 +362,8 @@ class CallSession:
         await self.play([greeting])
 
     def on_media(self, data: bytes) -> None:
+        if self.down_in is not None:
+            data = self.down_in.push(data)
         raw, clean = self.aec.capture(data) if self.aec is not None else (data, data)
         self.inbuf += clean
         self.rawbuf += raw
@@ -649,19 +660,20 @@ class CallSession:
 
     async def _play(self, chunks: list[bytes], audio_q: asyncio.Queue | None) -> None:
         t0, n = self.loop.time(), 0
+        frame_s = self.frame_bytes / 2 / self.rate
 
         async def send(pcm: bytes) -> None:
             nonlocal t0, n
             for frame in frames(pcm, self.frame_bytes):
                 if not self.xon.is_set():
                     await self.xon.wait()
-                    t0 = self.loop.time() - n * FRAME_SECONDS
-                delay = t0 + n * FRAME_SECONDS - self.loop.time()
+                    t0 = self.loop.time() - n * frame_s
+                delay = t0 + n * frame_s - self.loop.time()
                 if delay > 0:
                     await asyncio.sleep(delay)
                 await self.ws.send_bytes(frame)
-                if self.aec is not None:
-                    self.aec.render(frame)  # the reference: what the caller's echo will be made of
+                if self.aec is not None:  # the reference: what the caller's echo will be made of
+                    self.aec.render(self.down_out.push(frame) if self.down_out is not None else frame)
                 self.played_bytes += len(frame)
                 n += 1
 
@@ -736,7 +748,7 @@ class CallSession:
         self.runtime.usage.record(
             datetime.fromtimestamp(self.started, UTC).date().isoformat(), self.tenant, self.params.agent_id, {
                 "calls": 1, "connected_seconds": time.time() - self.started,
-                "agent_speech_seconds": self.played_bytes / 2 / SAMPLE_RATE, "caller_turns": len(self.turn_log),
+                "agent_speech_seconds": self.played_bytes / 2 / self.rate, "caller_turns": len(self.turn_log),
                 "llm_requests": llm.requests, "llm_input_tokens": llm.input_tokens,
                 "llm_output_tokens": llm.output_tokens, "llm_estimated_requests": llm.estimated_requests,
                 "tts_characters": self.spoken_chars, "fallbacks": int(outcome == "fallback")})

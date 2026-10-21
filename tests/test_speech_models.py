@@ -148,3 +148,11 @@ def test_silero_skips_what_it_cannot_say(engines):
     assert len(engines.synthesize("silero-oksana", "Hello. Да.")) > 0  # the Latin sentence is dropped, not an error
     many = " ".join(["Здравствуйте, это длинное приветствие компании."] * 40)  # ~1900 characters, several pieces
     assert len(engines.synthesize("silero-roman", many)) > 2 * 8000 * 60
+
+
+@pytest.mark.parametrize("voice", ["ru_RU-dmitri-medium", *(SILERO_VOICES[:1] if SILERO else [])])
+def test_a_wideband_call_gets_the_same_speech_at_16_khz(engines, voice):
+    narrow = engines.synthesize(voice, "Записываю заявку на обратный звонок.")
+    wide = engines.synthesize(voice, "Записываю заявку на обратный звонок.", 16000)
+    assert abs(len(wide) / 2 / 16000 - len(narrow) / 2 / 8000) < 0.15  # the same duration
+    assert engines.phrase(voice, "Соединяю.", 16000) != engines.phrase(voice, "Соединяю.")  # cached per rate

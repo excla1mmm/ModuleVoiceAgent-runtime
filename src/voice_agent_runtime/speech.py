@@ -17,10 +17,11 @@ import re
 import threading
 import urllib.request
 from collections import OrderedDict
+from math import gcd
 from pathlib import Path
 
 import numpy as np
-from scipy.signal import resample_poly
+from scipy.signal import firwin, lfilter, resample_poly
 
 from . import biasing
 from .config import SUPPORTED_VOICES, VOICES, Settings
@@ -75,12 +76,34 @@ def silero_chunks(text: str, limit: int = SILERO_MAX_CHARS) -> list[str]:
     return [p for p in pieces if SPEAKABLE.search(p)]
 
 
-def to_pcm8k(audio: np.ndarray, rate: int) -> bytes:
+SILERO_RATES = (8000, 24000, 48000)  # what Silero synthesizes; 16 kHz is made from 24 kHz
+
+
+def to_pcm(audio: np.ndarray, rate: int, out_rate: int = SAMPLE_RATE) -> bytes:
     audio = np.asarray(audio)
     if audio.dtype == np.int16 or np.abs(audio).max(initial=0) > 1.5:
         audio = audio.astype(np.float32) / 32768
-    out = resample_poly(audio.astype(np.float32), SAMPLE_RATE, rate)
-    return (np.clip(out, -1, 1) * 32767).astype(np.int16).tobytes()
+    if rate != out_rate:
+        g = gcd(out_rate, rate)
+        audio = resample_poly(audio.astype(np.float32), out_rate // g, rate // g)
+    return (np.clip(audio, -1, 1) * 32767).astype(np.int16).tobytes()
+
+
+class Downsampler:
+    """slin16 -> 8 kHz for one stream, continuous across frames: the low-pass keeps its state between them."""
+
+    def __init__(self, rate_in: int):
+        self.factor = rate_in // SAMPLE_RATE
+        self.taps = firwin(63, 0.9 * SAMPLE_RATE / 2, fs=rate_in)
+        self.zi = np.zeros(len(self.taps) - 1)
+        self.phase = 0  # index of the first sample to keep in the next chunk
+
+    def push(self, data: bytes) -> bytes:
+        x = np.frombuffer(data, dtype=np.int16).astype(np.float64)
+        y, self.zi = lfilter(self.taps, 1.0, x, zi=self.zi)
+        out = y[self.phase::self.factor]
+        self.phase = (self.phase - len(x)) % self.factor
+        return np.clip(np.round(out), -32768, 32767).astype(np.int16).tobytes()
 
 
 class StreamVad:
@@ -168,18 +191,19 @@ class SileroTts:
         self.accentor = load_accentor()
         self.lock = threading.Lock()
 
-    def synthesize(self, speaker: str, text: str) -> bytes:
+    def synthesize(self, speaker: str, text: str, rate: int = SAMPLE_RATE) -> bytes:
+        model_rate = rate if rate in SILERO_RATES else 24000
         chunks = []
         for piece in silero_chunks(text):
             with self.lock, self.torch.inference_mode():
                 try:
-                    audio = self.model.apply_tts(text=self.accentor(piece), speaker=speaker, sample_rate=SAMPLE_RATE)
+                    audio = self.model.apply_tts(text=self.accentor(piece), speaker=speaker, sample_rate=model_rate)
                 except ValueError:  # nothing the model can say in this piece
                     continue
             chunks.append(audio.numpy())
         if not chunks:
             return b""
-        return to_pcm8k(np.concatenate(chunks), SAMPLE_RATE)
+        return to_pcm(np.concatenate(chunks), model_rate, rate)
 
 
 class SpeechEngines:
@@ -245,11 +269,12 @@ class SpeechEngines:
                 self._biases.popitem(last=False)
         return bias
 
-    def synthesize(self, voice_id: str, text: str) -> bytes:
-        """8 kHz PCM of ``text``; a voice that is not loaded speaks with the default voice."""
+    def synthesize(self, voice_id: str, text: str, rate: int = SAMPLE_RATE) -> bytes:
+        """PCM of ``text`` at ``rate`` (8 kHz, or 16 kHz for slin16 calls); a voice that is not loaded speaks with
+        the default voice."""
         voice_id = voice_id if voice_id in self.voices else self.default_voice
         if VOICES[voice_id].engine == "silero":
-            return self.silero.synthesize(VOICES[voice_id].speaker, text)
+            return self.silero.synthesize(VOICES[voice_id].speaker, text, rate)
         voice = self.piper[voice_id]
         with self._espeak:
             sentences = voice.phonemize(unstressed(text))
@@ -259,16 +284,16 @@ class SpeechEngines:
             chunks.append(audio[0] if isinstance(audio, tuple) else audio)
         if not chunks:
             return b""
-        return to_pcm8k(np.concatenate(chunks), voice.config.sample_rate)
+        return to_pcm(np.concatenate(chunks), voice.config.sample_rate, rate)
 
-    def phrase(self, voice_id: str, text: str) -> bytes:
-        """Synthesized audio of a fixed phrase (greeting, transfer, goodbye ...), cached per voice."""
-        key = (voice_id, text)
+    def phrase(self, voice_id: str, text: str, rate: int = SAMPLE_RATE) -> bytes:
+        """Synthesized audio of a fixed phrase (greeting, transfer, goodbye ...), cached per voice and rate."""
+        key = (voice_id, text, rate)
         with self._cache_lock:
             if key in self._cache:
                 self._cache.move_to_end(key)
                 return self._cache[key]
-        pcm = self.synthesize(voice_id, text)
+        pcm = self.synthesize(voice_id, text, rate)
         with self._cache_lock:
             if key not in self._cache:
                 self._cache[key] = pcm

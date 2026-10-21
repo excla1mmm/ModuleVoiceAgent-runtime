@@ -16,6 +16,8 @@ def test_media_start_plain_text():
 def test_media_start_json():
     msg = parse_control('{"event":"MEDIA_START","connection_id":"x","format":"slin","optimal_frame_size":320}')
     assert msg.name == "MEDIA_START" and MediaStart.from_control(msg).optimal_frame_size == 320
+    wide = MediaStart.from_control(parse_control("MEDIA_START format:slin16"))  # sent by Asterisk 22.11 for c(slin16)
+    assert wide.rate == 16000 and wide.optimal_frame_size == 640
 
 
 def test_other_events():

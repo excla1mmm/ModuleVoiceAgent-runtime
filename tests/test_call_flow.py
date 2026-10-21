@@ -22,6 +22,7 @@ class ScriptedEngines:
     def __init__(self, transcripts):
         self.transcripts = list(transcripts)
         self.recognized = []  # (seconds of audio, terms) per recognition
+        self.rates = []  # sample rate of every synthesis
 
     class Vad:
         def prob(self, hop):
@@ -34,11 +35,12 @@ class ScriptedEngines:
         self.recognized.append((len(audio) / 8000, terms))
         return self.transcripts.pop(0) if self.transcripts else ""
 
-    def synthesize(self, voice, text):
-        return (np.ones(160, dtype=np.int16) * 500).tobytes()  # 20 ms per clause
+    def synthesize(self, voice, text, rate=8000):
+        self.rates.append(rate)
+        return (np.ones(rate // 50, dtype=np.int16) * 500).tobytes()  # 20 ms per clause
 
-    def phrase(self, voice, text):
-        return self.synthesize(voice, text)
+    def phrase(self, voice, text, rate=8000):
+        return self.synthesize(voice, text, rate)
 
 
 SPEECH = (np.ones(8000, dtype=np.int16) * 8000).tobytes()  # 1 s of "speech"
@@ -72,7 +74,7 @@ async def speak_and_wait(ws, stop_on_hangup=True, timeout=5.0, audio=(SPEECH, SI
     return commands
 
 
-def run_call(llm_body, transcripts, bundle, audio=(SPEECH, SILENCE), engines=None, check_body=None):
+def run_call(llm_body, transcripts, bundle, audio=(SPEECH, SILENCE), engines=None, check_body=None, media="slin"):
     """``check_body``: the topic filter is on and its requests get this answer."""
     srv, handler = server(body=llm_body, check_body=check_body)
 
@@ -87,7 +89,8 @@ def run_call(llm_body, transcripts, bundle, audio=(SPEECH, SILENCE), engines=Non
             assert (await client.put("/v1/agents/3", json=bundle, headers=bearer())).status == 200
             ws = await client.ws_connect("/media?callerid=79991234567&callid=flow-1&agent=3", headers=basic(),
                                          protocols=("media",))
-            await ws.send_str("MEDIA_START connection_id:c1 format:slin optimal_frame_size:320 ptime:20")
+            frame = 640 if media == "slin16" else 320
+            await ws.send_str(f"MEDIA_START connection_id:c1 format:{media} optimal_frame_size:{frame} ptime:20")
             commands = await speak_and_wait(ws, timeout=3.0, audio=audio)
             await ws.close()
             resp = await client.get("/v1/calls/flow-1/result?wait=2", headers=bearer())
@@ -117,6 +120,19 @@ def test_transfer_follows_route_to_and_hangs_up_after_grace():
     assert body["messages"][0]["role"] == "system" and "79991234567" in body["messages"][0]["content"]
     assert body["messages"][-1] == {"role": "user", "content": "Соедините с директором"}
     assert body["messages"][1]["role"] == "assistant"  # the greeting is part of the history
+
+
+def test_a_wideband_call_speaks_at_16_khz_and_hears_the_caller_at_8():
+    """slin16 (dialled for G.722 / Opus callers): the agent's audio is synthesized at 16 kHz, the caller's audio is
+    brought down to the 8 kHz of the echo canceller, VAD and recognition."""
+    engines = ScriptedEngines(["Соедините с директором"])
+    speech16 = (np.ones(16000, dtype=np.int16) * 8000).tobytes()  # 1 s at 16 kHz
+    (commands, result), _ = run_call(TRANSFER_TO_CEO, [], bundle_data(transfer_grace_seconds=0),
+                                     audio=(speech16, b"\0" * 32000), engines=engines, media="slin16")
+    assert result["outcome"] == "transferred" and commands == ["HANGUP"]
+    assert engines.rates.count(8000) == 1  # only the greeting warmed up when the agent was loaded
+    assert engines.rates.count(16000) >= 2  # the call's greeting and reply
+    assert engines.recognized and 0.6 < engines.recognized[-1][0] < 1.6  # ~1 s of speech, measured at 8 kHz
 
 
 def test_unknown_number_is_not_transferred():

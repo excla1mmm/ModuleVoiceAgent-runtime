@@ -3,7 +3,8 @@
 Asterisk opens the WebSocket (subprotocol ``media``) and sends control messages as text, by default
 ``MEDIA_START connection_id:... channel:... channel_id:... format:slin optimal_frame_size:320 ptime:20``
 (the JSON control format is accepted as well). Binary frames carry signed linear 16-bit little-endian
-audio at 8 kHz in both directions; the application paces its frames at 20 ms. Commands sent back as text:
+audio at 8 kHz (``slin``) or 16 kHz (``slin16``, dialled for wideband callers) in both directions; the
+application paces its frames at 20 ms. Commands sent back as text:
 ``FLUSH_MEDIA`` drops audio queued in Asterisk (barge-in), ``HANGUP`` ends the WebSocket leg so the
 dialplan continues after Dial(). Variables from ``v(...)`` arrive as the query string of the request path.
 """
@@ -15,13 +16,14 @@ import re
 from dataclasses import dataclass, field
 from urllib.parse import parse_qs, urlsplit
 
-SAMPLE_RATE = 8000
+SAMPLE_RATE = 8000  # of the audio processing (echo canceller, VAD, recognition); slin16 input is brought down to it
 FRAME_BYTES = 320  # 20 ms of slin at 8 kHz
 FRAME_SECONDS = 0.02
+FORMAT_RATES = {"slin": 8000, "slin16": 16000}  # media format -> sample rate on the wire
 CMD_FLUSH_MEDIA = "FLUSH_MEDIA"
 CMD_HANGUP = "HANGUP"
 EVENT_MEDIA_START = "MEDIA_START"
-SUPPORTED_FORMATS = {"slin"}
+SUPPORTED_FORMATS = set(FORMAT_RATES)
 
 _CALLER = re.compile(r"[^0-9+]")
 _CALL_ID = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
@@ -50,14 +52,19 @@ class MediaStart:
     def from_control(cls, msg: ControlMessage) -> MediaStart:
         fmt = msg.params.get("format", "")
         if fmt not in SUPPORTED_FORMATS:
-            raise ProtocolError(f"unsupported media format {fmt!r}, dial with c(slin)")
+            raise ProtocolError(f"unsupported media format {fmt!r}, dial with c(slin) or c(slin16)")
+        default_frame = int(FORMAT_RATES[fmt] * FRAME_SECONDS) * 2
         try:
-            frame = int(msg.params.get("optimal_frame_size", FRAME_BYTES))
+            frame = int(msg.params.get("optimal_frame_size", default_frame))
             ptime = int(msg.params.get("ptime", 20))
         except ValueError as exc:
             raise ProtocolError("invalid MEDIA_START frame parameters") from exc
         return cls(msg.params.get("connection_id", ""), msg.params.get("channel", ""), fmt,
-                   frame if frame > 0 else FRAME_BYTES, ptime if ptime > 0 else 20)
+                   frame if frame > 0 else default_frame, ptime if ptime > 0 else 20)
+
+    @property
+    def rate(self) -> int:
+        return FORMAT_RATES[self.format]
 
 
 @dataclass(frozen=True)
