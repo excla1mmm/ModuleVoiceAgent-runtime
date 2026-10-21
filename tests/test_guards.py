@@ -364,3 +364,32 @@ def test_a_stutter_is_not_said():
     assert said == ["Внутренний номер Дмитрия —", "222."]
     f = ReplyFilter()
     assert f.feed("Да, да, да, конечно. ") + f.finish() == ["Да,", "да,", "да,", "конечно."]
+
+
+def test_callback_at_becomes_an_iso_date_checked_against_the_call_time():
+    from datetime import datetime
+
+    from voice_agent_runtime.guards import callback_at
+
+    now = datetime(2026, 10, 21, 14, 5)  # Wednesday
+    assert callback_at("22/10 15:00", now) == "2026-10-22T15:00"
+    assert callback_at("23.10", now) == "2026-10-23"
+    assert callback_at("21/10 в 9:30", now) == ""  # today, an hour already past
+    assert callback_at("21/10 13:50", now) == "2026-10-21T13:50"  # "сейчас" a few minutes ago is still today
+    assert callback_at("05/01 10:00", datetime(2026, 12, 30, 9, 0)) == "2027-01-05T10:00"  # over the new year
+    for bad in ("", "завтра", "31/02", "22/10 25:00", "20/10/2026", "15/03", "22/10/2026 15:00 ещё", "1/1/1"):
+        assert callback_at(bad, now) == "", bad
+    assert callback_at("22/10 15:00", None) == ""
+
+
+def test_a_saved_callback_carries_callback_at_only_when_it_is_valid():
+    from datetime import datetime
+
+    c = callback_ctx("Я Арбуз", "перезвоните завтра в 3")
+    c.now = datetime(2026, 10, 21, 14, 5)
+    base = {"name": "Арбуз", "phone": "333", "preferred_time": "завтра в 3", "topic": "модуль телефонии"}
+    d = decide("request_callback", json.dumps({**base, "callback_at": "22/10 15:00"}), "Да", "", c)
+    assert d.callback == {**base, "callback_at": "2026-10-22T15:00"}
+    assert "завтра в 3" in d.phrase  # the readback says the time as the caller said it
+    d = decide("request_callback", json.dumps({**base, "callback_at": "вчера"}), "Да", "", c)
+    assert d.callback == base

@@ -243,11 +243,12 @@ class CallSession:
         self.unavailable_reason = unavailable_reason if bundle is not None else (unavailable_reason or "bundle_missing")
         self.id = uuid.uuid4().hex[:12]  # runtime-internal id for technical logs (no phone numbers there)
         self.loop = asyncio.get_running_loop()
-        self.system = system_prompt(static_prompt, params.caller,
-                                    datetime.now(ZoneInfo(self.settings.timezone))) if bundle else ""
+        now = datetime.now(ZoneInfo(bundle.timezone if bundle and bundle.timezone else self.settings.timezone))
+        self.system = system_prompt(static_prompt, params.caller, now) if bundle else ""
         self.tools = tools(bundle) if bundle else []
         self.topic_prompt = topic.filter_prompt(bundle) if bundle and self.settings.topic_filter else ""
-        self.context = CallContext(caller=params.caller, callbacks_enabled=bool(bundle and bundle.callbacks_enabled))
+        self.context = CallContext(caller=params.caller, callbacks_enabled=bool(bundle and bundle.callbacks_enabled),
+                                   now=now)
         self.history: list[dict] = []
         self.detector = TurnDetector(HOP / SAMPLE_RATE, self.settings.speculate_ms, self.settings.turn_end_ms,
                                      self.settings.question_end_ms, self.settings.barge_in_frames,

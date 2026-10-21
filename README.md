@@ -102,7 +102,7 @@ old hash.
 | `VA_HOTWORDS` | true | Bias recognition towards the agent's terms and restore abbreviations |
 | `VA_AEC` | true | Echo cancellation of the caller audio (WebRTC AEC3 via livekit) with the agent audio as the reference; speech over the agent that it mostly removed is echo |
 | `VA_TOPIC_FILTER` | true | A short side request to the primary LLM per caller phrase (in parallel with the answer, ~0.2 s) refuses topics foreign to the company and attempts to change the agent's rules; short replies are not checked, errors let the answer through |
-| `VA_TIMEZONE` | Europe/Moscow | Time zone of the date and time the agent is told at the start of a call |
+| `VA_TIMEZONE` | Europe/Moscow | Time zone of the date and time the agent is told at the start of a call, when the bundle has no `timezone` |
 | `VA_HOTWORD_BOOST` | 0.45 | Decoder bonus per letter of a term (0 = no decoder biasing; LocalSTTWorker found >0.75 garbles words) |
 | `VA_ASR_THREADS` | 1 | ONNX intra-op threads of the STT model |
 | `VA_SPECULATE_MS`, `VA_TURN_END_MS`, `VA_QUESTION_END_MS` | 120, 600, 300 | Turn-taking pauses |
@@ -194,7 +194,7 @@ last 31 days, at most 366) returns the calling PBX's `days` (per day and agent),
 
 The PBX `/health` answer also carries `boot_id` (a new value for every start: the module pushes its bundles at
 once) and `capabilities` (`result_ack`, `usage`, `voices`, `voice_samples`, `off_hours`, `hotwords`, `ready`,
-`handoff`).
+`handoff`, `slin16`, `callback_at`).
 
 Bearer = `Authorization: Bearer <pbx_id>.<token>`; Operator = `Authorization: Bearer <VA_ADMIN_TOKEN>`;
 Basic = the websocket_client username/password. A PBX never sees another PBX's numbers.

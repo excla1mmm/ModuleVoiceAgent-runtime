@@ -75,7 +75,7 @@ STARTUP_WINDOW_S = 30.0
 STARTUP_BUNDLE_WAIT_S = 10.0
 # What this version can do, for the PBX module (GET /health): features the module would otherwise detect by 404.
 CAPABILITIES = ("result_ack", "usage", "voices", "voice_samples", "off_hours", "hotwords", "ready", "handoff",
-                "slin16")
+                "slin16", "callback_at")
 SAMPLE_TEXT = "Здравствуйте! Вы позвонили в нашу компанию. Чем могу помочь?"
 MAX_SAMPLE_CHARS = 300
 

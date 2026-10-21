@@ -3,6 +3,12 @@
 ## Unreleased
 
 ### Added
+- Callback date: `request_callback` takes an optional `callback_at` the model works out from the date and time
+  it is told ("завтра в 3" -> "22/10 15:00"); the runtime checks it (a real date from today up to 92 days ahead,
+  not an hour already past) and adds it to the result's `callback` as `2026-10-22T15:00` (`2026-10-22` without
+  an hour). `preferred_time` stays as the caller said it and is still read back. Capability `callback_at`.
+- Optional bundle field `timezone` (IANA name): the PBX time zone of the date and time the agent is told;
+  without it, or with a zone this runtime does not know, `VA_TIMEZONE` is used.
 - Restarts keep the agents: `deploy.sh --restart` saves the old instance's bundles to the data volume
   (`voice-agent-runtime save-bundles`, `VA_HANDOFF_FILE`), and the new instance loads them and deletes the file
   before it reports ready. A call that comes within 30 s after a start, before its PBX pushed the bundle again,

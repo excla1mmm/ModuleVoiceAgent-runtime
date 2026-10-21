@@ -24,7 +24,9 @@
   caller asked for earlier in the call ("давай заявочку оставим") is not offered again; no second confirmation
   when the model confirmed. A topic made only of callback words ("перезвонить клиенту") is asked for, one that
   names something ("заявка на обратный звонок с отделом продаж") is not (call 18). While a callback is being
-  arranged, a transfer the caller did not ask for in so many words becomes an offer.
+  arranged, a transfer the caller did not ask for in so many words becomes an offer. The model's
+  ``callback_at`` ("22/10 15:00", "24/10") becomes an ISO date (and time) when it is a real date from today up
+  to 92 days ahead and not an hour already past; otherwise it is dropped and the request is saved without it.
 * a stutter of the model ("Внутерьний внутренний внутренний... Внутренний номер") is not said: a clause
   with one word three times in a row.
 * a transfer turned into an offer names whom the model wanted to transfer to (call 19: "есть у вас Егор?"
@@ -37,6 +39,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta
 
 CLAUSE_END = re.compile(r"(?<=[.!?,:;—])\s+")
 # a note "(We ...", tool arguments as JSON, a special token "<|start|>" or a run of dots
@@ -94,6 +97,8 @@ TIME_SAID = re.compile(r"\b\d{1,2}[:.]\d{2}\b|\bв\s+\d{1,2}\b|\b\d{1,2}\s*(?:ч
                        r"|утр|вечер|д[её]н|ночь|сейчас|сегодня|завтра|послезавтра|понедельн|вторн|сред[уаы]|четверг"
                        r"|пятниц|суббот|воскресен|час|минут|обед|любое|когда угодно|неделе|недел|январ|феврал|март"
                        r"|апрел|ма[йя]|июн|июл|август|сентябр|октябр|ноябр|декабр", re.I)
+CALLBACK_AT = re.compile(r"(\d{1,2})[./](\d{1,2})(?:[./](\d{4}))?(?:,?\s+(?:в\s+)?(\d{1,2})[:.](\d{2}))?")
+CALLBACK_AT_DAYS = 92
 TOOL_RESULTS = {"request_callback": "Заявка на обратный звонок сохранена.",
                 "transfer_call": "Звонок переведён.", "end_call": "Разговор завершён."}
 
@@ -238,6 +243,32 @@ def missing_callback_fields(data: dict, said: str | None = None) -> list[str]:
     return [k for k in CALLBACK_FIELDS if k in missing]
 
 
+def callback_at(raw: str, now: datetime | None) -> str:
+    """The callback date the model worked out ("22/10 15:00") as "2026-10-22T15:00" ("2026-10-22" without an
+    hour); "" for a malformed, past or far-off one. A date without a year is the next such day."""
+    m = CALLBACK_AT.fullmatch(str(raw or "").strip())
+    if now is None or m is None:
+        return ""
+    day, month, year, hour, minute = (int(g) if g else None for g in m.groups())
+    today = now.date()
+    try:
+        when = date(year or today.year, month, day)
+        if year is None and when < today:
+            when = date(today.year + 1, month, day)
+    except ValueError:
+        return ""
+    if not today <= when <= today + timedelta(days=CALLBACK_AT_DAYS):
+        return ""
+    if hour is None:
+        return when.isoformat()
+    if hour > 23 or minute > 59:
+        return ""
+    at = datetime(when.year, when.month, when.day, hour, minute)
+    if at < now.replace(tzinfo=None, second=0, microsecond=0) - timedelta(minutes=30):
+        return ""  # "сегодня в 10" said at 14:00 is a slip, not a time to call
+    return f"{when.isoformat()}T{hour:02d}:{minute:02d}"
+
+
 def callback_readback(callback: dict, caller: str) -> str:
     """The saved request read back, so a wrong name, time or number can be corrected at once."""
     phone = callback["phone"]
@@ -278,6 +309,7 @@ class CallContext:
     asked_anything_else: bool = False  # the agent's last words asked "Чем ещё могу помочь?"
     caller_said: tuple[str, ...] = ()  # the caller's earlier phrases (a callback name or time must come from them)
     off_topic: int = 0  # off-topic phrases in a row (topic.py)
+    now: datetime | None = None  # the date and time the agent was told (callback_at is checked against it)
 
 
 def decide(tool: str | None, raw_args: str, caller_text: str, reply: str, ctx: CallContext) -> ToolDecision:
@@ -328,6 +360,8 @@ def decide(tool: str | None, raw_args: str, caller_text: str, reply: str, ctx: C
             return ToolDecision(tool, args, phrase=PHRASES[ask],
                                 tool_result="Заявка не сохранена, не хватает: " + ", ".join(missing) + ".")
         callback = {k: str(args[k]).strip()[:500] for k in CALLBACK_FIELDS}
+        if at := callback_at(str(args.get("callback_at", "")), ctx.now):
+            callback["callback_at"] = at
         if "заявк" in reply.lower():  # the model confirmed it itself: no second confirmation
             return ToolDecision(tool, args, callback=callback)
         return ToolDecision(tool, args, phrase=callback_readback(callback, ctx.caller), phrase_cached=False,

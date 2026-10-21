@@ -3,13 +3,15 @@
 The PBX module builds the bundle from its own database (agent settings, directory, knowledge base) and
 pushes it with ``PUT /v1/agents/{agent_id}``; ``version`` is the PBX-side hash of the content, so the PBX
 can see which agents the runtime already has after a heartbeat. Optional fields (absent in older modules):
-``hotwords`` - terms that speech recognition should prefer (see ``hotwords.py``).
+``hotwords`` - terms that speech recognition should prefer (see ``hotwords.py``); ``timezone`` - the PBX time
+zone (IANA name) of the date and time the agent is told, an unknown one falls back to ``VA_TIMEZONE``.
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .config import DEFAULT_VOICE
 
@@ -68,6 +70,7 @@ class AgentBundle:
     queues: tuple[QueueEntry, ...] = ()
     knowledge: tuple[KnowledgeEntry, ...] = ()
     hotwords: tuple[str, ...] = ()
+    timezone: str = ""  # "" = the runtime's VA_TIMEZONE
 
     def transfer_targets(self) -> set[str]:
         """Numbers the agent may transfer to: the directory, the queues and the fallback number."""
@@ -148,6 +151,18 @@ def _hotwords(data: dict) -> tuple[str, ...]:
     return tuple(item.strip() for item in value if item.strip())
 
 
+def _timezone(data: dict) -> str:
+    """The PBX time zone; one this runtime's tzdata does not know is ignored rather than refusing the agent."""
+    value = _text(data, "timezone", 64)
+    if not value:
+        return ""
+    try:
+        ZoneInfo(value)
+    except (ZoneInfoNotFoundError, ValueError):
+        return ""
+    return value
+
+
 def parse_bundle(agent_id: str, data: dict) -> AgentBundle:
     if not isinstance(data, dict):
         raise BundleError("bundle must be a JSON object")
@@ -181,4 +196,5 @@ def parse_bundle(agent_id: str, data: dict) -> AgentBundle:
         callbacks_enabled=bool(data.get("callbacks_enabled", True)),
         transfer_grace_s=_grace(data, "transfer_grace_seconds", 2.0),
         goodbye_grace_s=_grace(data, "goodbye_grace_seconds", 3.0),
-        directory=tuple(directory), queues=tuple(queues), knowledge=tuple(knowledge), hotwords=_hotwords(data))
+        directory=tuple(directory), queues=tuple(queues), knowledge=tuple(knowledge), hotwords=_hotwords(data),
+        timezone=_timezone(data))

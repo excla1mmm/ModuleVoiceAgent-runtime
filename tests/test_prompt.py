@@ -88,3 +88,17 @@ def test_the_prompt_knows_the_date_and_time():
 
     text = system_prompt(static_prompt(parse_bundle("3", bundle_data())), "333", datetime(2026, 10, 18, 10, 15))
     assert "Сейчас воскресенье, 18 октября 2026 года, 10:15." in text and text.endswith("333.")
+
+
+def test_the_callback_tool_asks_for_a_date_beside_the_spoken_time():
+    callback = tools(parse_bundle("3", bundle_data()))[1]["function"]["parameters"]
+    assert "callback_at" in callback["properties"] and "callback_at" not in callback["required"]
+    assert "В callback_at переведи" in static_prompt(parse_bundle("3", bundle_data()))
+
+
+def test_the_bundle_time_zone_is_optional_and_an_unknown_one_is_ignored():
+    assert parse_bundle("3", bundle_data()).timezone == ""
+    assert parse_bundle("3", bundle_data(timezone="Asia/Novosibirsk")).timezone == "Asia/Novosibirsk"
+    assert parse_bundle("3", bundle_data(timezone="Mars/Olympus")).timezone == ""
+    with pytest.raises(BundleError):
+        parse_bundle("3", bundle_data(timezone=5))
